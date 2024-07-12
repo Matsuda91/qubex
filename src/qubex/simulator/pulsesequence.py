@@ -2,7 +2,7 @@ import numpy as np
 import itertools
 import matplotlib.pyplot as plt
 from tabulate import tabulate
-from system import System
+from .system import System
 
 
 SAMPLING_PERIOD = 0.1 # ns
