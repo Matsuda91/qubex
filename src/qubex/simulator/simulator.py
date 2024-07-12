@@ -10,8 +10,8 @@ import numpy.typing as npt
 import qctrlvisualizer as qv
 import qutip as qt
 
-from system import StateAlias,System
-from pulsesequence import Sequence, SAMPLING_PERIOD
+from .system import StateAlias,System
+from .pulsesequence import Sequence, SAMPLING_PERIOD
 
 # from .system import StateAlias, System
 
