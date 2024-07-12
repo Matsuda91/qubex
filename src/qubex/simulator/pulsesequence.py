@@ -176,7 +176,7 @@ class Sequence:
 		return label[index+1:]
 	
 	def plot(self,yauto=True):
-		fig = plt.figure(figsize=(float(self.times[-1]*0.1),0.8*len(self.sequences.keys())))
+		fig = plt.figure(figsize=(12,0.8*len(self.sequences.keys())))
 		for ldx, label in enumerate(self.sequences.keys()):
 			plt.subplot(len(self.sequences.keys()),1,ldx+1)
 			plt.tick_params(axis='x', labelbottom=False)
