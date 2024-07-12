@@ -20,7 +20,6 @@ STEPS_PER_SAMPLE: int = 1
 @dataclass
 class Control:
     sequence: Sequence
-    sampling_period: float = SAMPLING_PERIOD
     steps_per_sample: int = STEPS_PER_SAMPLE
 
     def values(self,label) -> npt.NDArray[np.complex128]:
@@ -39,7 +38,7 @@ class Control:
         
         return np.linspace(
             0.0,
-            length * self.sampling_period / self.steps_per_sample,
+            length * SAMPLING_PERIOD / self.steps_per_sample,
             length,
         )
 
@@ -48,7 +47,7 @@ class Control:
 
     def plot(self, polar: bool = False) -> None:
         for target, sequence in self.sequence.sequences.items():
-            durations = [self.sampling_period * 1e-9] * len(sequence)
+            durations = [SAMPLING_PERIOD * 1e-9] * len(sequence)
             values = np.array(sequence, dtype=np.complex128) * 1e9
             qv.plot_controls(
                 controls={
