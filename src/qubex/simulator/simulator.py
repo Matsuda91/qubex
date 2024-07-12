@@ -173,12 +173,12 @@ class Simulator:
                 index_b = list(self.system.graph.nodes).index(control.sequence.control_qubit_2Qgate(label))
 
                 delta = 2*np.pi*(control.sequence.channels[label]-self.system.transmons[index_b].rotating_frame)
-                drive_hamiltonian.append([b, np.exp(1j*delta*control.times)*control.values(label)])
-                drive_hamiltonian.append([b.dag(), np.exp(-1j*delta*control.times)*np.conj(control.values(label))])
+                drive_hamiltonian.append([b, np.exp(1j*delta*control.times)*np.conj(control.values(label))])
+                drive_hamiltonian.append([b.dag(), np.exp(-1j*delta*control.times)*control.values(label)])
             else:
                 a = self.system.lowering_operator(label)
-                drive_hamiltonian.append([a, control.values(label)])
-                drive_hamiltonian.append([a.dag(), np.conj(control.values(label))])
+                drive_hamiltonian.append([a, np.conj(control.values(label))])
+                drive_hamiltonian.append([a.dag(), control.values(label)])
                 
             
         return drive_hamiltonian
