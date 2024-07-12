@@ -19,7 +19,16 @@ class Transmon:
     anharmonicity: float
     decay_rate: float = 0.0
     dephasing_rate: float = 0.0
+    rotating_frame: bool|float = False
 
+    def __post_init__(self):
+        if self.rotating_frame==True:
+            self.rotating_frame = self.frequency
+        elif self.rotating_frame==False:
+            self.rotating_frame = 0.0
+        else:
+            pass
+            
 
 @dataclass
 class Coupling:
