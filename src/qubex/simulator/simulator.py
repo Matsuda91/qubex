@@ -19,9 +19,6 @@ STEPS_PER_SAMPLE: int = 1
 
 @dataclass
 class Control:
-    # target: str
-    # frequency: float
-    # waveform: list | npt.NDArray
     sequence: Sequence
     sampling_period: float = SAMPLING_PERIOD
     steps_per_sample: int = STEPS_PER_SAMPLE
@@ -71,33 +68,17 @@ class Result:
     def substates(
         self,
         label: str,
-        # frame: Literal["qubit", "drive"] = "qubit",
     ) -> list[qt.Qobj]:
         index = self.system.index(label)
         substates = [state.ptrace(index) for state in self.states]
-
-        # if frame == "qubit":
-        #     # rotate the states to the qubit frame
-        #     times = self.control.times
-        #     qubit = self.system.transmon(label)
-        #     f_drive = self.control.frequency
-        #     f_qubit = qubit.frequency
-        #     delta = 2 * np.pi * (f_drive - f_qubit)
-        #     dim = qubit.dimension
-        #     a = qt.destroy(dim)
-        #     U = lambda t: (-1j * delta * a.dag() * a * t).expm()
-        #     substates = [U(t) * rho * U(t).dag() for t, rho in zip(times, substates)]
-
         return substates
 
     def display_bloch_sphere(
         self,
         label: str,
-        # frame: Literal["qubit", "drive"] = "qubit",
     ) -> None:
         substates = self.substates(label)
         rho = np.array(substates).squeeze()[:, :2, :2]
-        # print(f"{label} in the {frame} frame")
         print(f"{label}")
         qv.display_bloch_sphere_from_density_matrices(rho)
 
@@ -160,9 +141,6 @@ class Simulator:
             # rotating frame of the control frequency
             static_hamiltonian -= 2 * np.pi * transmon.rotating_frame * ad * a
             
-            # if transmon.label == control.target:
-            #     dynamic_hamiltonian.append([0.5 * ad, control.values])
-            #     dynamic_hamiltonian.append([0.5 * a, np.conj(control.values)])
             decay_operator = np.sqrt(transmon.decay_rate) * a
             dephasing_operator = np.sqrt(transmon.dephasing_rate) * ad * a
             collapse_operators.append(decay_operator)
