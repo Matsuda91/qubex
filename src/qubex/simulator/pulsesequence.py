@@ -47,7 +47,7 @@ class RaisedCosFlatTop(Pulse):
 		shape[t <= self.risetime] = 0.5*(1-np.cos(np.pi*t[t <= self.risetime]/self.risetime))
 		shape[t > self.duration-self.risetime] = 0.5*(1-np.cos(np.pi*(t[(t > self.risetime) & (2*self.risetime > t)]/self.risetime)))
 		shape[(t > self.risetime) & (t <= self.duration-self.risetime)] = 1
-		return self.amplitude*shape*np.exp(-1j*self.phase)
+		return self.amplitude*shape*np.exp(1j*self.phase)
 
 
 class Gaussian(Pulse):
@@ -70,7 +70,7 @@ class Gaussian(Pulse):
 		t = np.linspace(0, self.duration-SAMPLING_PERIOD, int(self.duration/SAMPLING_PERIOD))
 		sigma = self.duration/2
 		shape = np.exp(-0.5*((t-self.duration/2)**2)/((sigma/self.n_sigma)**2)) 
-		return self.amplitude*shape*np.exp(-1j*self.phase)
+		return self.amplitude*shape*np.exp(1j*self.phase)
 
 class Half_pi(Pulse):
 
