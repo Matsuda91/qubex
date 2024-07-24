@@ -16,7 +16,11 @@ class Pulse:
         self._validate_shape()
 
     def _validate_shape(self):
-        intensity = np.abs(self.shape) / self.amplitude
+        if self.amplitude != 0:
+            intensity = np.abs(self.shape) / self.amplitude
+        else:
+            pass
+
         if np.max(intensity) > 1:
             raise ValueError(
                 "Pulse shape intensity has values exceeding 1. The range is [-1,1]"
