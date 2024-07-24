@@ -170,10 +170,10 @@ class Result:
             "y": [],
             "z": [],
         }
-
-        expectation_values["x"].append(qt.expect(sigmax, substates[-1]))
-        expectation_values["y"].append(qt.expect(sigmay, substates[-1]))
-        expectation_values["z"].append(qt.expect(sigmaz, substates[-1]))
+        for _, state in enumerate(substates):
+            expectation_values["x"].append(qt.expect(sigmax, state))
+            expectation_values["y"].append(qt.expect(sigmay, state))
+            expectation_values["z"].append(qt.expect(sigmaz, state))
 
         return expectation_values
 
