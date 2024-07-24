@@ -125,16 +125,7 @@ class Result:
             qt.basis(self.system.transmons[index].dimension, 1)
             * qt.basis(self.system.transmons[index].dimension, 0).dag()
         )
-        return qt.tensor(
-            [
-                (
-                    (ket0bra1 + ket1bra0)
-                    if transmon.label == label
-                    else qt.qeye(transmon.dimension)
-                )
-                for transmon in self.system.transmons
-            ]
-        )
+        return ket0bra1 + ket1bra0
 
     def _sigmay(self, label: str) -> qt.Qobj:
         if label not in self.system.graph.nodes:
@@ -148,16 +139,7 @@ class Result:
             qt.basis(self.system.transmons[index].dimension, 1)
             * qt.basis(self.system.transmons[index].dimension, 0).dag()
         )
-        return qt.tensor(
-            [
-                (
-                    (1j * ket0bra1 - 1j * ket1bra0)
-                    if transmon.label == label
-                    else qt.qeye(transmon.dimension)
-                )
-                for transmon in self.system.transmons
-            ]
-        )
+        return 1j * ket0bra1 - 1j * ket1bra0
 
     def _sigmaz(self, label: str) -> qt.Qobj:
         if label not in self.system.graph.nodes:
@@ -171,16 +153,7 @@ class Result:
             qt.basis(self.system.transmons[index].dimension, 1)
             * qt.basis(self.system.transmons[index].dimension, 1).dag()
         )
-        return qt.tensor(
-            [
-                (
-                    (ket0bra0 - ket1bra1)
-                    if transmon.label == label
-                    else qt.qeye(transmon.dimension)
-                )
-                for transmon in self.system.transmons
-            ]
-        )
+        return ket0bra0 - ket1bra1
 
     def expectation_values(
         self,
