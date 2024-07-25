@@ -20,10 +20,10 @@ class Pulse:
             intensity = np.abs(self.shape) / self.amplitude
         else:
             intensity = np.abs(self.shape)
-
-        if np.max(intensity) > 1:
+        maxvalue = np.round(np.max(intensity), 10)
+        if maxvalue > 1:
             raise ValueError(
-                "Pulse shape intensity has values exceeding 1. The range is [-1,1]"
+                f"Pulse shape intensity (={maxvalue}) has values exceeding 1. The range is [-1,1]"
             )
         else:
             pass
