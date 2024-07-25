@@ -19,7 +19,7 @@ class Pulse:
         if self.amplitude != 0:
             intensity = np.abs(self.shape) / self.amplitude
         else:
-            pass
+            intensity = np.abs(self.shape)
 
         if np.max(intensity) > 1:
             raise ValueError(
