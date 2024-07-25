@@ -268,8 +268,28 @@ class Simulator:
                 )
             else:
                 a = self.system.lowering_operator(label)
-                drive_hamiltonian.append([a, np.conj(control.values(label))])
-                drive_hamiltonian.append([a.dag(), control.values(label)])
+                index_a = list(self.system.graph.nodes).index(label)
+                delta = (
+                    2
+                    * np.pi
+                    * (
+                        control.sequence.channels[label]
+                        - self.system.transmons[index_a].rotating_frame
+                    )
+                )
+                drive_hamiltonian.append(
+                    [
+                        a,
+                        np.exp(1j * delta * control.times)
+                        * np.conj(control.values(label)),
+                    ]
+                )
+                drive_hamiltonian.append(
+                    [
+                        a.dag(),
+                        np.exp(-1j * delta * control.times) * control.values(label),
+                    ]
+                )
 
         return drive_hamiltonian
 
