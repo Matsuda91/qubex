@@ -11,7 +11,6 @@ import qctrlvisualizer as qv
 import qutip as qt
 
 from .system import StateAlias, System
-from .pulsesequence import Sequence, SAMPLING_PERIOD
 
 SAMPLING_PERIOD: float = 2.0  # ns
 STEP_PER_SAMPLE: int = 4
@@ -88,7 +87,7 @@ class Control:
         length = len(self.values)
         return np.linspace(
             0.0,
-            length * SAMPLING_PERIOD / self.steps_per_sample,
+            length * self.sampling_period / self.steps_per_sample,
             length,
         )
 
@@ -298,6 +297,7 @@ class Result:
     def substates(
         self,
         label: str,
+        frame: Literal["qubit", "drive"] = "qubit",
     ) -> list[qt.Qobj]:
         """
         Extract the substates of a qubit from the states.
@@ -316,6 +316,19 @@ class Result:
         """
         index = self.system.index(label)
         substates = [state.ptrace(index) for state in self.states]
+
+        if frame == "qubit":
+            # rotate the states to the qubit frame
+            times = self.control.times
+            qubit = self.system.transmon(label)
+            f_drive = self.control.frequency
+            f_qubit = qubit.frequency
+            delta = 2 * np.pi * (f_drive - f_qubit)
+            dim = qubit.dimension
+            a = qt.destroy(dim)
+            U = lambda t: (-1j * delta * a.dag() * a * t).expm()
+            substates = [U(t) * rho * U(t).dag() for t, rho in zip(times, substates)]
+
         return substates
 
     def display_bloch_sphere(
@@ -354,7 +367,7 @@ class Result:
         population = states[-1].diag()
         for idx, prob in enumerate(population):
             basis = self.system.basis_labels[idx] if label is None else str(idx)
-            print(f"|{basis}⟩: {prob:.3f}")
+            print(f"|{basis}⟩: {prob:.6f}")
 
     def plot_population_dynamics(
         self,
@@ -384,70 +397,6 @@ class Result:
             populations,
             figure=figure,
         )
-
-    def _sigmax(self, label: str) -> qt.Qobj:
-        if label not in self.system.graph.nodes:
-            raise ValueError(f"Transmon {label} does not exist.")
-        index = self.system.index(label)
-        ket0bra1 = (
-            qt.basis(self.system.transmons[index].dimension, 0)
-            * qt.basis(self.system.transmons[index].dimension, 1).dag()
-        )
-        ket1bra0 = (
-            qt.basis(self.system.transmons[index].dimension, 1)
-            * qt.basis(self.system.transmons[index].dimension, 0).dag()
-        )
-        return ket0bra1 + ket1bra0
-
-    def _sigmay(self, label: str) -> qt.Qobj:
-        if label not in self.system.graph.nodes:
-            raise ValueError(f"Transmon {label} does not exist.")
-        index = self.system.index(label)
-        ket0bra1 = (
-            qt.basis(self.system.transmons[index].dimension, 0)
-            * qt.basis(self.system.transmons[index].dimension, 1).dag()
-        )
-        ket1bra0 = (
-            qt.basis(self.system.transmons[index].dimension, 1)
-            * qt.basis(self.system.transmons[index].dimension, 0).dag()
-        )
-        return 1j * ket0bra1 - 1j * ket1bra0
-
-    def _sigmaz(self, label: str) -> qt.Qobj:
-        if label not in self.system.graph.nodes:
-            raise ValueError(f"Transmon {label} does not exist.")
-        index = self.system.index(label)
-        ket0bra0 = (
-            qt.basis(self.system.transmons[index].dimension, 0)
-            * qt.basis(self.system.transmons[index].dimension, 0).dag()
-        )
-        ket1bra1 = (
-            qt.basis(self.system.transmons[index].dimension, 1)
-            * qt.basis(self.system.transmons[index].dimension, 1).dag()
-        )
-        return ket0bra0 - ket1bra1
-
-    def expectation_values(
-        self,
-        label: str,
-    ) -> dict[str, list[float]]:
-        index = self.system.index(label)
-        substates = self.substates(label)
-        sigmax = self._sigmax(label)
-        sigmay = self._sigmay(label)
-        sigmaz = self._sigmaz(label)
-
-        expectation_values = {
-            "x": [],
-            "y": [],
-            "z": [],
-        }
-        for _, state in enumerate(substates):
-            expectation_values["x"].append(qt.expect(sigmax, state))
-            expectation_values["y"].append(qt.expect(sigmay, state))
-            expectation_values["z"].append(qt.expect(sigmaz, state))
-
-        return expectation_values
 
 
 class Simulator:
@@ -515,13 +464,14 @@ class Simulator:
             collapse_operators.append(decay_operator)
             collapse_operators.append(dephasing_operator)
 
-        for _, coupling in enumerate(self.system.couplings):
-            static_hamiltonian -= self.system.coupling_hamiltonian(coupling)
-
-        dynamic_hamiltonian = self._drive_hamiltonian(
-            control
-        ) + self._coupling_hamiltonian(control)
         total_hamiltonian = [static_hamiltonian] + dynamic_hamiltonian
+
+        if len(control.times) == 0:
+            return Result(
+                system=self.system,
+                control=control,
+                states=[],
+            )
 
         result = qt.mesolve(
             H=total_hamiltonian,
@@ -535,98 +485,3 @@ class Simulator:
             control=control,
             states=result.states,
         )
-
-    def _drive_hamiltonian(self, control):
-        drive_hamiltonian: list = []
-        for (
-            _,
-            label,
-        ) in enumerate(control.labels()):
-            if "-" in label:
-                b = self.system.lowering_operator(
-                    control.sequence.control_qubit_2Qgate(label)
-                )
-                index_b = list(self.system.graph.nodes).index(
-                    control.sequence.control_qubit_2Qgate(label)
-                )
-
-                delta = (
-                    2
-                    * np.pi
-                    * (
-                        control.sequence.channels[label]
-                        - self.system.transmons[index_b].rotating_frame
-                    )
-                )
-                drive_hamiltonian.append(
-                    [
-                        b,
-                        np.exp(1j * delta * control.times)
-                        * np.conj(control.values(label)),
-                    ]
-                )
-                drive_hamiltonian.append(
-                    [
-                        b.dag(),
-                        np.exp(-1j * delta * control.times) * control.values(label),
-                    ]
-                )
-            else:
-                a = self.system.lowering_operator(label)
-                index_a = list(self.system.graph.nodes).index(label)
-                delta = (
-                    2
-                    * np.pi
-                    * (
-                        control.sequence.channels[label]
-                        - self.system.transmons[index_a].rotating_frame
-                    )
-                )
-                drive_hamiltonian.append(
-                    [
-                        a,
-                        np.exp(1j * delta * control.times)
-                        * np.conj(control.values(label)),
-                    ]
-                )
-                drive_hamiltonian.append(
-                    [
-                        a.dag(),
-                        np.exp(-1j * delta * control.times) * control.values(label),
-                    ]
-                )
-
-        return drive_hamiltonian
-
-    def _coupling_hamiltonian(self, control):
-        coupling_hamiltonian: list = []
-        for _, coupling in enumerate(self.system.couplings):
-            if "-" in coupling.label:
-                indexa = list(self.system.graph.nodes).index(coupling.pair[0])
-                a = self.system.lowering_operator(coupling.pair[0])
-                indexb = list(self.system.graph.nodes).index(coupling.pair[1])
-                b = self.system.lowering_operator(coupling.pair[1])
-
-                delta = (
-                    2
-                    * np.pi
-                    * (
-                        self.system.transmons[indexa].rotating_frame
-                        - self.system.transmons[indexb].rotating_frame
-                    )
-                )
-                coupling_hamiltonian.append(
-                    [
-                        a.dag() * b,
-                        coupling.strength * np.exp(1j * delta * control.times),
-                    ]
-                )
-                coupling_hamiltonian.append(
-                    [
-                        a * b.dag(),
-                        coupling.strength * np.exp(-1j * delta * control.times),
-                    ]
-                )
-            else:
-                pass
-        return coupling_hamiltonian
