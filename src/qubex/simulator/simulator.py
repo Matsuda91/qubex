@@ -398,6 +398,70 @@ class Result:
             figure=figure,
         )
 
+    def _sigmax(self, label: str) -> qt.Qobj:
+        if label not in self.system.graph.nodes:
+            raise ValueError(f"Transmon {label} does not exist.")
+        index = self.system.index(label)
+        ket0bra1 = (
+            qt.basis(self.system.transmons[index].dimension, 0)
+            * qt.basis(self.system.transmons[index].dimension, 1).dag()
+        )
+        ket1bra0 = (
+            qt.basis(self.system.transmons[index].dimension, 1)
+            * qt.basis(self.system.transmons[index].dimension, 0).dag()
+        )
+        return ket0bra1 + ket1bra0
+
+    def _sigmay(self, label: str) -> qt.Qobj:
+        if label not in self.system.graph.nodes:
+            raise ValueError(f"Transmon {label} does not exist.")
+        index = self.system.index(label)
+        ket0bra1 = (
+            qt.basis(self.system.transmons[index].dimension, 0)
+            * qt.basis(self.system.transmons[index].dimension, 1).dag()
+        )
+        ket1bra0 = (
+            qt.basis(self.system.transmons[index].dimension, 1)
+            * qt.basis(self.system.transmons[index].dimension, 0).dag()
+        )
+        return 1j * ket0bra1 - 1j * ket1bra0
+
+    def _sigmaz(self, label: str) -> qt.Qobj:
+        if label not in self.system.graph.nodes:
+            raise ValueError(f"Transmon {label} does not exist.")
+        index = self.system.index(label)
+        ket0bra0 = (
+            qt.basis(self.system.transmons[index].dimension, 0)
+            * qt.basis(self.system.transmons[index].dimension, 0).dag()
+        )
+        ket1bra1 = (
+            qt.basis(self.system.transmons[index].dimension, 1)
+            * qt.basis(self.system.transmons[index].dimension, 1).dag()
+        )
+        return ket0bra0 - ket1bra1
+
+    def expectation_values(
+        self,
+        label: str,
+    ) -> dict[str, list[float]]:
+        index = self.system.index(label)
+        substates = self.substates(label)
+        sigmax = self._sigmax(label)
+        sigmay = self._sigmay(label)
+        sigmaz = self._sigmaz(label)
+
+        expectation_values = {
+            "x": [],
+            "y": [],
+            "z": [],
+        }
+        for _, state in enumerate(substates):
+            expectation_values["x"].append(qt.expect(sigmax, state))
+            expectation_values["y"].append(qt.expect(sigmay, state))
+            expectation_values["z"].append(qt.expect(sigmaz, state))
+
+        return expectation_values
+
 
 class Simulator:
     def __init__(
