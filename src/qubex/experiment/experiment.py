@@ -3,13 +3,17 @@ from __future__ import annotations
 import sys
 from collections import defaultdict
 from contextlib import contextmanager
+from copy import deepcopy
+from dataclasses import asdict
 from datetime import datetime
+from pathlib import Path
 from typing import Final, Literal, Optional, Sequence
 
 import numpy as np
 import plotly.graph_objects as go
 from IPython.display import clear_output, display
-from numpy.typing import NDArray
+from numpy.typing import ArrayLike, NDArray
+from plotly.subplots import make_subplots
 from rich.console import Console
 from rich.prompt import Confirm
 from rich.table import Table
@@ -24,18 +28,33 @@ from ..analysis import (
     plot_state_vectors,
     plot_waveform,
 )
-from ..clifford import CliffordGroup
-from ..config import Config, Params, Qubit, Resonator, Target
-from ..measurement import MeasureResult, StateClassifier
+from ..backend import (
+    Box,
+    ControlParams,
+    ControlSystem,
+    ExperimentSystem,
+    MixingUtil,
+    QuantumSystem,
+    Qubit,
+    Resonator,
+    StateManager,
+    Target,
+)
+from ..clifford import Clifford, CliffordGenerator
+from ..measurement import (
+    Measurement,
+    MeasureResult,
+    StateClassifier,
+    StateClassifierGMM,
+    StateClassifierKMeans,
+)
 from ..measurement.measurement import (
-    DEFAULT_CAPTURE_OFFSET,
+    DEFAULT_CAPTURE_MARGIN,
     DEFAULT_CAPTURE_WINDOW,
     DEFAULT_CONFIG_DIR,
-    DEFAULT_CONTROL_WINDOW,
     DEFAULT_INTERVAL,
     DEFAULT_READOUT_DURATION,
     DEFAULT_SHOTS,
-    Measurement,
 )
 from ..pulse import (
     CPMG,
@@ -53,6 +72,7 @@ from ..pulse import (
 )
 from ..typing import IQArray, ParametricPulseSchedule, ParametricWaveformDict, TargetMap
 from ..version import get_package_version
+from . import experiment_tool
 from .experiment_note import ExperimentNote
 from .experiment_record import ExperimentRecord
 from .experiment_result import (
@@ -68,14 +88,14 @@ from .experiment_result import (
     T2Data,
     TimePhaseData,
 )
-from .experiment_tool import ExperimentTool
 
 console = Console()
 
-MIN_DURATION = 128
-
 USER_NOTE_PATH = ".user_note.json"
 SYSTEM_NOTE_PATH = ".system_note.json"
+
+RABI_PARAMS = "rabi_params"
+STATE_CENTERS = "state_centers"
 
 HPI_AMPLITUDE = "hpi_amplitude"
 HPI_DURATION = 30
@@ -84,11 +104,12 @@ PI_AMPLITUDE = "pi_amplitude"
 PI_DURATION = 30
 PI_RISETIME = 10
 DRAG_HPI_AMPLITUDE = "drag_hpi_amplitude"
+DRAG_HPI_BETA = "drag_hpi_beta"
 DRAG_HPI_DURATION = 16
-DRAG_HPI_LAMBDA = 0.5
 DRAG_PI_AMPLITUDE = "drag_pi_amplitude"
+DRAG_PI_BETA = "drag_pi_beta"
 DRAG_PI_DURATION = 16
-DRAG_PI_LAMBDA = 0.5
+DRAG_COEFF = 0.5
 
 
 class Experiment:
@@ -99,10 +120,12 @@ class Experiment:
     ----------
     chip_id : str
         Identifier of the quantum chip.
-    qubits : list[str]
+    qubits : Sequence[str]
         List of qubits to use in the experiment.
     config_dir : str, optional
         Directory of the configuration files. Defaults to DEFAULT_CONFIG_DIR.
+    fetch_device_state : bool, optional
+        Whether to fetch the device state. Defaults to True.
     control_window : int, optional
         Control window. Defaults to DEFAULT_CONTROL_WINDOW.
     capture_window : int, optional
@@ -123,32 +146,31 @@ class Experiment:
         self,
         *,
         chip_id: str,
-        qubits: list[str],
+        qubits: Sequence[str],
         config_dir: str = DEFAULT_CONFIG_DIR,
-        control_window: int = DEFAULT_CONTROL_WINDOW,
+        fetch_device_state: bool = True,
+        control_window: int | None = None,
         capture_window: int = DEFAULT_CAPTURE_WINDOW,
-        capture_offset: int = DEFAULT_CAPTURE_OFFSET,
+        capture_margin: int = DEFAULT_CAPTURE_MARGIN,
         readout_duration: int = DEFAULT_READOUT_DURATION,
-        use_neopulse: bool = True,
+        use_neopulse: bool = False,
+        classifier_type: Literal["kmeans", "gmm"] = "gmm",
     ):
         self._chip_id: Final = chip_id
-        self._qubits: Final = qubits
+        self._qubits: Final = list(qubits)
+        self._config_dir: Final = config_dir
         self._control_window: Final = control_window
         self._capture_window: Final = capture_window
-        self._capture_offset: Final = capture_offset
+        self._capture_margin: Final = capture_margin
         self._readout_duration: Final = readout_duration
-        self._rabi_params: Optional[dict[str, RabiParam]] = None
-        self._config: Final = Config(config_dir)
+        self._classifier_type: Final = classifier_type
+        self._rabi_params: Final[dict[str, RabiParam]] = {}
         self._measurement = Measurement(
             chip_id=chip_id,
+            qubits=qubits,
             config_dir=config_dir,
+            fetch_device_state=fetch_device_state,
             use_neopulse=use_neopulse,
-        )
-        self.tool: Final = ExperimentTool(
-            chip_id=self._chip_id,
-            qubits=self._qubits,
-            config=self._config,
-            measurement=self._measurement,
         )
         self._user_note: Final = ExperimentNote(
             file_path=USER_NOTE_PATH,
@@ -156,17 +178,51 @@ class Experiment:
         self._system_note: Final = ExperimentNote(
             file_path=SYSTEM_NOTE_PATH,
         )
+        self._validate()
         self.print_environment()
 
-    @property
-    def system(self):
-        """Get the quantum system."""
-        return self._config.get_quantum_system(self._chip_id)
+    def _validate(self):
+        """Check if the experiment is valid."""
+        available_qubits = [
+            target.qubit for target in self.experiment_system.ge_targets
+        ]
+        unavailable_qubits = [
+            qubit for qubit in self._qubits if qubit not in available_qubits
+        ]
+        if len(unavailable_qubits) > 0:
+            err_msg = f"Unavailable qubits: {unavailable_qubits}"
+            print(err_msg)
+            raise ValueError(err_msg)
 
     @property
-    def params(self) -> Params:
-        """Get the system parameters."""
-        return self._config.get_params(self._chip_id)
+    def tool(self):
+        """Get the experiment tool."""
+        return experiment_tool
+
+    @property
+    def state_manager(self) -> StateManager:
+        """Get the state manager."""
+        return StateManager.shared()
+
+    @property
+    def experiment_system(self) -> ExperimentSystem:
+        """Get the experiment system."""
+        return self.state_manager.experiment_system
+
+    @property
+    def quantum_system(self) -> QuantumSystem:
+        """Get the quantum system."""
+        return self.experiment_system.quantum_system
+
+    @property
+    def control_system(self) -> ControlSystem:
+        """Get the qube system."""
+        return self.experiment_system.control_system
+
+    @property
+    def params(self) -> ControlParams:
+        """Get the control parameters."""
+        return self.experiment_system.control_params
 
     @property
     def chip_id(self) -> str:
@@ -174,45 +230,97 @@ class Experiment:
         return self._chip_id
 
     @property
+    def qubit_labels(self) -> list[str]:
+        """Get the list of qubit labels."""
+        return self._qubits
+
+    @property
+    def mux_labels(self) -> list[str]:
+        """Get the list of mux labels."""
+        mux_set = set()
+        for qubit in self.qubit_labels:
+            mux = self.experiment_system.get_mux_by_qubit(qubit)
+            mux_set.add(mux.label)
+        return sorted(list(mux_set))
+
+    @property
     def qubits(self) -> dict[str, Qubit]:
-        """Get the qubits."""
-        all_qubits = self._config.get_qubits(self._chip_id)
-        qubits = {}
-        for qubit in all_qubits:
-            if qubit.label in self._qubits:
-                qubits[qubit.label] = qubit
-        return qubits
+        """Get the available qubit dict."""
+        return {
+            qubit.label: qubit
+            for qubit in self.experiment_system.qubits
+            if qubit.label in self.qubit_labels
+        }
 
     @property
     def resonators(self) -> dict[str, Resonator]:
-        """Get the resonators."""
-        all_resonators = self._config.get_resonators(self._chip_id)
-        resonators = {}
-        for resonator in all_resonators:
-            if resonator.qubit in self._qubits:
-                resonators[resonator.qubit] = resonator
-        return resonators
+        """Get the available resonator dict."""
+        return {
+            resonator.qubit: resonator
+            for resonator in self.experiment_system.resonators
+            if resonator.qubit in self.qubit_labels
+        }
 
     @property
     def targets(self) -> dict[str, Target]:
-        """Get the targets."""
-        all_targets = self._measurement.targets
-        targets = {}
-        for target in all_targets:
-            if all_targets[target].qubit in self._qubits:
-                targets[target] = all_targets[target]
-        return targets
+        """Get the target dict."""
+        return {
+            target.label: target
+            for target in self.experiment_system.targets
+            if target.qubit in self.qubit_labels
+        }
 
     @property
-    def box_list(self) -> list[str]:
-        """Get the list of the box IDs."""
-        boxes = self._config.get_boxes_by_qubits(self._chip_id, self._qubits)
-        return [box.id for box in boxes]
+    def available_targets(self) -> dict[str, Target]:
+        """Get the available target dict."""
+        return {
+            target.label: target
+            for target in self.experiment_system.targets
+            if target.qubit in self.qubit_labels and target.is_available
+        }
+
+    @property
+    def ge_targets(self) -> dict[str, Target]:
+        """Get the available target dict."""
+        return {
+            label: target
+            for label, target in self.available_targets.items()
+            if target.is_ge
+        }
+
+    @property
+    def ef_targets(self) -> dict[str, Target]:
+        """Get the available target dict."""
+        return {
+            label: target
+            for label, target in self.available_targets.items()
+            if target.is_ef
+        }
+
+    @property
+    def cr_targets(self) -> dict[str, Target]:
+        """Get the available target dict."""
+        return {
+            label: target
+            for label, target in self.available_targets.items()
+            if target.is_cr
+        }
+
+    @property
+    def boxes(self) -> dict[str, Box]:
+        """Get the available box dict."""
+        boxes = self.experiment_system.get_boxes_for_qubits(self.qubit_labels)
+        return {box.id: box for box in boxes}
+
+    @property
+    def box_ids(self) -> list[str]:
+        """Get the available box IDs."""
+        return list(self.boxes.keys())
 
     @property
     def config_path(self) -> str:
         """Get the path of the configuration file."""
-        return str(self._config.config_path)
+        return str(Path(self._config_dir).resolve())
 
     @property
     def note(self) -> ExperimentNote:
@@ -283,13 +391,15 @@ class Experiment:
             DRAG π/2 pulse.
         """
         calib_amplitude: dict[str, float] = self._system_note.get(DRAG_HPI_AMPLITUDE)
-        if calib_amplitude is None:
-            raise ValueError("DRAG HPI amplitude is not stored.")
+        calib_beta: dict[str, float] = self._system_note.get(DRAG_HPI_BETA)
+
+        if calib_amplitude is None or calib_beta is None:
+            raise ValueError("DRAG HPI amplitude or beta is not stored.")
         return {
             target: Drag(
                 duration=DRAG_HPI_DURATION,
                 amplitude=calib_amplitude[target],
-                beta=-DRAG_HPI_LAMBDA / self.qubits[target].anharmonicity,
+                beta=calib_beta[target],
             )
             for target in self._qubits
         }
@@ -305,13 +415,14 @@ class Experiment:
             DRAG π pulse.
         """
         calib_amplitude: dict[str, float] = self._system_note.get(DRAG_PI_AMPLITUDE)
-        if calib_amplitude is None:
-            raise ValueError("DRAG PI amplitude is not stored.")
+        calib_beta: dict[str, float] = self._system_note.get(DRAG_PI_BETA)
+        if calib_amplitude is None or calib_beta is None:
+            raise ValueError("DRAG PI amplitude or beta is not stored.")
         return {
             target: Drag(
                 duration=DRAG_PI_DURATION,
                 amplitude=calib_amplitude[target],
-                beta=-DRAG_PI_LAMBDA / self.qubits[target].anharmonicity,
+                beta=calib_beta[target],
             )
             for target in self._qubits
         }
@@ -327,7 +438,9 @@ class Experiment:
             π/2 pulse.
         """
         amplitude = self._system_note.get(HPI_AMPLITUDE)
-        ef_labels = [Target.get_ef_label(target) for target in self._qubits]
+        if amplitude is None:
+            raise ValueError("EF π/2 amplitude is not stored.")
+        ef_labels = [Target.ef_label(target) for target in self._qubits]
         return {
             target: FlatTop(
                 duration=HPI_DURATION,
@@ -348,7 +461,10 @@ class Experiment:
             π/2 pulse.
         """
         amplitude = self._system_note.get(PI_AMPLITUDE)
-        ef_labels = [Target.get_ef_label(target) for target in self._qubits]
+        if amplitude is None:
+            raise ValueError("EF π amplitude is not stored.")
+        ef_labels = [Target.ef_label(target) for target in self._qubits]
+
         return {
             target: FlatTop(
                 duration=PI_DURATION,
@@ -361,8 +477,16 @@ class Experiment:
     @property
     def rabi_params(self) -> dict[str, RabiParam]:
         """Get the Rabi parameters."""
-        if self._rabi_params is None:
-            return {}
+        params: dict[str, dict] | None
+        params = self._system_note.get(RABI_PARAMS)
+        if params is not None:
+            rabi_params = {
+                target: RabiParam(**param)
+                for target, param in params.items()
+                if target in self.qubit_labels
+            }
+            self._rabi_params.update(rabi_params)
+
         return self._rabi_params
 
     @property
@@ -371,34 +495,46 @@ class Experiment:
         return {
             target: param
             for target, param in self.rabi_params.items()
-            if Target.is_ge_control(target)
+            if self.targets[target].is_ge
         }
 
     @property
     def ef_rabi_params(self) -> dict[str, RabiParam]:
         """Get the ef Rabi parameters."""
         return {
-            Target.get_ge_label(target): param
+            Target.ge_label(target): param
             for target, param in self.rabi_params.items()
-            if Target.is_ef_control(target)
+            if self.targets[target].is_ef
         }
 
     @property
-    def classifiers(self) -> dict[str, StateClassifier]:
+    def classifiers(self) -> TargetMap[StateClassifier]:
         """Get the classifiers."""
         return self._measurement.classifiers
 
     @property
-    def state_centroids(self) -> dict[str, dict[int, complex]]:
-        """Get the state centroids."""
+    def state_centers(self) -> dict[str, dict[int, complex]]:
+        """Get the state centers."""
+        centers: dict[str, dict[str, list[float]]] | None
+        centers = self._system_note.get(STATE_CENTERS)
+        if centers is not None:
+            return {
+                target: {
+                    int(state): complex(center[0], center[1])
+                    for state, center in centers.items()
+                }
+                for target, centers in centers.items()
+                if target in self.qubit_labels
+            }
+
         return {
-            target: classifier.centroids
+            target: classifier.centers
             for target, classifier in self.classifiers.items()
         }
 
     def _validate_rabi_params(self):
         """Check if the Rabi parameters are stored."""
-        if self._rabi_params is None:
+        if len(self._rabi_params) == 0:
             raise ValueError("Rabi parameters are not stored.")
 
     def store_rabi_params(self, rabi_params: dict[str, RabiParam]):
@@ -410,14 +546,16 @@ class Experiment:
         rabi_params : dict[str, RabiParam]
             Parameters of the Rabi oscillation.
         """
-        if self._rabi_params is not None:
-            if self._rabi_params.keys().isdisjoint(rabi_params.keys()):
-                self._rabi_params.update(rabi_params)
-            else:
-                if Confirm.ask("Overwrite the existing Rabi parameters?"):
-                    self._rabi_params.update(rabi_params)
-        else:
-            self._rabi_params = rabi_params
+        if self._rabi_params.keys().isdisjoint(rabi_params.keys()):
+            self._rabi_params.update(rabi_params)
+        # else:
+        #     if not Confirm.ask("Overwrite the existing Rabi parameters?"):
+        #         return
+
+        self._system_note.put(
+            RABI_PARAMS,
+            {label: asdict(rabi_param) for label, rabi_param in rabi_params.items()},
+        )
         console.print("Rabi parameters are stored.")
 
     def get_pulse_for_state(
@@ -471,62 +609,65 @@ class Experiment:
         list[Qubit]
             List of the spectators.
         """
-        spectator_labels = self.system.chip.graph.get_spectators(qubit)
-        spectators: list[Qubit] = []
-        for label in spectator_labels:
-            spectator = self._config.get_qubit(self.chip_id, label)
-            spectators.append(spectator)
-        return spectators
+        return self.quantum_system.get_spectator_qubits(qubit)
 
     def print_environment(self, verbose: bool = False):
         """Print the environment information."""
         print("date:", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
         print("python:", sys.version.split()[0])
-        print("env:", sys.prefix)
         if verbose:
             print("numpy:", get_package_version("numpy"))
             print("quel_ic_config:", get_package_version("quel_ic_config"))
             print("quel_clock_master:", get_package_version("quel_clock_master"))
             print("qubecalib:", get_package_version("qubecalib"))
         print("qubex:", get_package_version("qubex"))
-        print("config:", self._config.config_path)
-        print("chip:", self._chip_id)
-        print("qubits:", self._qubits)
-        print("control_window:", self._control_window, "ns")
-        print("")
-        print("Following devices will be used:")
-        self.print_boxes()
+        print("env:", sys.prefix)
+        print("config:", self.config_path)
+        print("chip:", self.chip_id)
+        print("qubits:", self.qubit_labels)
+        print("muxes:", self.mux_labels)
+        print("boxes:", self.box_ids)
 
     def print_boxes(self):
         """Print the box information."""
-        boxes = self._config.get_boxes_by_qubits(self._chip_id, self._qubits)
         table = Table(header_style="bold")
         table.add_column("ID", justify="left")
         table.add_column("NAME", justify="left")
         table.add_column("ADDRESS", justify="left")
         table.add_column("ADAPTER", justify="left")
-        for box in boxes:
+        for box in self.boxes.values():
             table.add_row(box.id, box.name, box.address, box.adapter)
         console.print(table)
 
     def check_status(self):
         """Check the status of the measurement system."""
-        link_status = self._measurement.check_link_status(self.box_list)
-        clock_status = self._measurement.check_clock_status(self.box_list)
+        # linnk status
+        link_status = self._measurement.check_link_status(self.box_ids)
         if link_status["status"]:
-            console.print("Link status: OK", style="green")
+            print("Link status: OK")
         else:
-            console.print("Link status: NG", style="red")
-        console.print(link_status["links"])
+            print("Link status: NG")
+        print(link_status["links"])
+
+        # clock status
+        clock_status = self._measurement.check_clock_status(self.box_ids)
         if clock_status["status"]:
-            console.print("Clock status: OK", style="green")
+            print("Clock status: OK")
         else:
-            console.print("Clock status: NG", style="red")
-        console.print(clock_status["clocks"])
+            print("Clock status: NG")
+        print(clock_status["clocks"])
+
+        # config status
+        config_status = self.state_manager.is_synced(box_ids=self.box_ids)
+        if config_status:
+            print("Config status: OK")
+        else:
+            print("Config status: NG")
+        print(self.state_manager.device_settings)
 
     def linkup(
         self,
-        box_list: Optional[list[str]] = None,
+        box_ids: Optional[list[str]] = None,
         noise_threshold: int = 500,
     ) -> None:
         """
@@ -534,17 +675,37 @@ class Experiment:
 
         Parameters
         ----------
-        box_list : Optional[list[str]], optional
+        box_ids : Optional[list[str]], optional
             List of the box IDs to link up. Defaults to None.
 
         Examples
         --------
         >>> ex.linkup()
         """
-        if box_list is None:
-            box_list = self.box_list
-        self._measurement.linkup(box_list, noise_threshold=noise_threshold)
-        self.check_status()
+        if box_ids is None:
+            box_ids = self.box_ids
+        self._measurement.linkup(box_ids, noise_threshold=noise_threshold)
+
+    def configure(self, box_ids: Optional[list[str]] = None):
+        """
+        Configure the measurement system from the config files.
+
+        Parameters
+        ----------
+        box_ids : Optional[list[str]], optional
+            List of the box IDs to configure. Defaults to None.
+
+        Examples
+        --------
+        >>> ex.configure()
+        """
+        self.state_manager.load(
+            chip_id=self.chip_id,
+            config_dir=self.config_path,
+        )
+        self.state_manager.push(
+            box_ids=box_ids or self.box_ids,
+        )
 
     @contextmanager
     def modified_frequencies(self, frequencies: dict[str, float] | None):
@@ -564,7 +725,7 @@ class Experiment:
         if frequencies is None:
             yield
         else:
-            with self._measurement.modified_frequencies(frequencies):
+            with self.state_manager.modified_frequencies(frequencies):
                 yield
 
     def print_defaults(self):
@@ -615,25 +776,6 @@ class Experiment:
         print(f"description: {record.description}")
         print(f"created_at: {record.created_at}")
         return record
-
-    def normalize(
-        self,
-        data: IQArray,
-        rabi_param: RabiParam,
-    ) -> NDArray[np.float64]:
-        """
-        Normalize the measured data.
-
-        Parameters
-        ----------
-        data : IQArray
-            Measured data.
-        rabi_param : RabiParam
-            Rabi parameters.
-        """
-        values = data * np.exp(-1j * rabi_param.angle)
-        values_normalized = (np.imag(values) - rabi_param.offset) / rabi_param.amplitude
-        return values_normalized
 
     def execute(
         self,
@@ -691,8 +833,9 @@ class Experiment:
         interval: int = DEFAULT_INTERVAL,
         control_window: int | None = None,
         capture_window: int | None = None,
-        capture_offset: int | None = None,
+        capture_margin: int | None = None,
         readout_duration: int | None = None,
+        readout_amplitudes: dict[str, float] | None = None,
         plot: bool = False,
     ) -> MeasureResult:
         """
@@ -714,10 +857,12 @@ class Experiment:
             Control window. Defaults to None.
         capture_window : int, optional
             Capture window. Defaults to None.
-        capture_offset : int, optional
-            Capture offset. Defaults to None.
+        capture_margin : int, optional
+            Capture margin. Defaults to None.
         readout_duration : int, optional
             Readout duration. Defaults to None.
+        readout_amplitudes : dict[str, float], optional
+            Readout amplitude for each target. Defaults to None.
         plot : bool, optional
             Whether to plot the measured signals. Defaults to False.
 
@@ -739,7 +884,7 @@ class Experiment:
         """
         control_window = control_window or self._control_window
         capture_window = capture_window or self._capture_window
-        capture_offset = capture_offset or self._capture_offset
+        capture_margin = capture_margin or self._capture_margin
         readout_duration = readout_duration or self._readout_duration
         waveforms = {}
 
@@ -760,8 +905,9 @@ class Experiment:
                 interval=interval,
                 control_window=control_window,
                 capture_window=capture_window,
-                capture_offset=capture_offset,
+                capture_margin=capture_margin,
                 readout_duration=readout_duration,
+                readout_amplitudes=readout_amplitudes,
             )
         else:
             with self.modified_frequencies(frequencies):
@@ -772,8 +918,9 @@ class Experiment:
                     interval=interval,
                     control_window=control_window,
                     capture_window=capture_window,
-                    capture_offset=capture_offset,
+                    capture_margin=capture_margin,
                     readout_duration=readout_duration,
+                    readout_amplitudes=readout_amplitudes,
                 )
         if plot:
             result.plot()
@@ -788,8 +935,9 @@ class Experiment:
         interval: int = DEFAULT_INTERVAL,
         control_window: int | None = None,
         capture_window: int | None = None,
-        capture_offset: int | None = None,
+        capture_margin: int | None = None,
         readout_duration: int | None = None,
+        readout_amplitudes: dict[str, float] | None = None,
     ):
         """
         Measures the signals using the given sequences.
@@ -808,10 +956,12 @@ class Experiment:
             Control window. Defaults to None.
         capture_window : int, optional
             Capture window. Defaults to None.
-        capture_offset : int, optional
-            Capture offset. Defaults to None.
+        capture_margin : int, optional
+            Capture margin. Defaults to None.
         readout_duration : int, optional
             Readout duration. Defaults to None.
+        readout_amplitudes : dict[str, float], optional
+            Readout amplitude for each target. Defaults to None.
 
         Yields
         ------
@@ -832,8 +982,9 @@ class Experiment:
             interval=interval,
             control_window=control_window or self._control_window,
             capture_window=capture_window or self._capture_window,
-            capture_offset=capture_offset or self._capture_offset,
+            capture_margin=capture_margin or self._capture_margin,
             readout_duration=readout_duration or self._readout_duration,
+            readout_amplitudes=readout_amplitudes,
         )
 
     def measure_state(
@@ -847,7 +998,7 @@ class Experiment:
         interval: int = DEFAULT_INTERVAL,
         control_window: int | None = None,
         capture_window: int | None = None,
-        capture_offset: int | None = None,
+        capture_margin: int | None = None,
         readout_duration: int | None = None,
         plot: bool = False,
     ) -> MeasureResult:
@@ -868,8 +1019,8 @@ class Experiment:
             Control window. Defaults to None.
         capture_window : int, optional
             Capture window. Defaults to None.
-        capture_offset : int, optional
-            Capture offset. Defaults to None.
+        capture_margin : int, optional
+            Capture margin. Defaults to None.
         readout_duration : int, optional
             Readout duration. Defaults to None.
         plot : bool, optional
@@ -896,7 +1047,7 @@ class Experiment:
         for target, state in states.items():
             targets.append(target)
             if state == "f":
-                targets.append(Target.get_ef_label(target))
+                targets.append(Target.ef_label(target))
 
         with PulseSchedule(targets) as ps:
             for target, state in states.items():
@@ -909,7 +1060,7 @@ class Experiment:
                 elif state == "f":
                     ps.add(target, self.pi_pulse[target])
                     ps.barrier()
-                    ef_label = Target.get_ef_label(target)
+                    ef_label = Target.ef_label(target)
                     ps.add(ef_label, self.ef_pi_pulse[ef_label])
 
         return self.measure(
@@ -919,14 +1070,14 @@ class Experiment:
             interval=interval,
             control_window=control_window,
             capture_window=capture_window,
-            capture_offset=capture_offset,
+            capture_margin=capture_margin,
             readout_duration=readout_duration,
             plot=plot,
         )
 
     def check_noise(
         self,
-        targets: list[str],
+        targets: list[str] | None = None,
         *,
         duration: int = 10240,
         plot: bool = True,
@@ -936,8 +1087,8 @@ class Experiment:
 
         Parameters
         ----------
-        targets : list[str]
-            List of targets to check the noise.
+        targets : list[str], optional
+            List of targets to check the noise. Defaults to None.
         duration : int, optional
             Duration of the noise measurement. Defaults to 2048.
         plot : bool, optional
@@ -952,6 +1103,9 @@ class Experiment:
         --------
         >>> result = ex.check_noise(["Q00", "Q01"])
         """
+        if targets is None:
+            targets = self.qubit_labels
+
         result = self._measurement.measure_noise(targets, duration)
         for target, data in result.data.items():
             if plot:
@@ -965,7 +1119,7 @@ class Experiment:
 
     def check_waveform(
         self,
-        targets: list[str],
+        targets: list[str] | None = None,
         *,
         plot: bool = True,
     ) -> MeasureResult:
@@ -974,7 +1128,7 @@ class Experiment:
 
         Parameters
         ----------
-        targets : list[str]
+        targets : list[str], optional
             List of targets to check the waveforms.
         plot : bool, optional
             Whether to plot the measured signals. Defaults to True.
@@ -988,6 +1142,9 @@ class Experiment:
         --------
         >>> result = ex.check_waveform(["Q00", "Q01"])
         """
+        if targets is None:
+            targets = self.qubit_labels
+
         result = self.measure(sequence={target: np.zeros(0) for target in targets})
         if plot:
             result.plot()
@@ -995,8 +1152,12 @@ class Experiment:
 
     def check_rabi(
         self,
-        targets: list[str],
+        targets: list[str] | None = None,
         *,
+        time_range: ArrayLike | None = None,
+        shots: int = DEFAULT_SHOTS,
+        interval: int = DEFAULT_INTERVAL,
+        store_params: bool = True,
         plot: bool = True,
     ) -> ExperimentResult[RabiData]:
         """
@@ -1004,8 +1165,16 @@ class Experiment:
 
         Parameters
         ----------
-        targets : list[str]
+        targets : list[str], optional
             List of targets to check the Rabi oscillation.
+        time_range : ArrayLike, optional
+            Time range of the experiment in ns.
+        shots : int, optional
+            Number of shots. Defaults to DEFAULT_SHOTS.
+        interval : int, optional
+            Interval between shots. Defaults to DEFAULT_INTERVAL.
+        store_params : bool, optional
+            Whether to store the Rabi parameters. Defaults to True.
         plot : bool, optional
             Whether to plot the measured signals. Defaults to True.
 
@@ -1018,13 +1187,27 @@ class Experiment:
         --------
         >>> result = ex.check_rabi(["Q00", "Q01"])
         """
-        return self.obtain_rabi_params(targets, plot=plot)
+        if targets is None:
+            targets = self.qubit_labels
+        if time_range is None:
+            time_range = np.arange(0, 201, 8)
+        ampl = self.params.control_amplitude
+        amplitudes = {target: ampl[target] for target in targets}
+        result = self.rabi_experiment(
+            amplitudes=amplitudes,
+            time_range=time_range,
+            shots=shots,
+            interval=interval,
+            store_params=store_params,
+            plot=plot,
+        )
+        return result
 
     def obtain_rabi_params(
         self,
         targets: list[str],
         *,
-        time_range: NDArray = np.arange(0, 201, 8),
+        time_range: ArrayLike | None = None,
         shots: int = DEFAULT_SHOTS,
         interval: int = DEFAULT_INTERVAL,
         plot: bool = True,
@@ -1036,7 +1219,7 @@ class Experiment:
         ----------
         targets : list[str]
             List of targets to check the Rabi oscillation.
-        time_range : NDArray, optional
+        time_range : ArrayLike, optional
             Time range of the experiment in ns.
         shots : int, optional
             Number of shots. Defaults to DEFAULT_SHOTS.
@@ -1054,6 +1237,9 @@ class Experiment:
         --------
         >>> result = ex.obtain_rabi_params(["Q00", "Q01"])
         """
+        if time_range is None:
+            time_range = np.arange(0, 201, 8)
+
         ampl = self.params.control_amplitude
         amplitudes = {target: ampl[target] for target in targets}
         result = self.rabi_experiment(
@@ -1070,7 +1256,7 @@ class Experiment:
         self,
         targets: list[str],
         *,
-        time_range: NDArray = np.arange(0, 201, 8),
+        time_range: ArrayLike | None = None,
         shots: int = DEFAULT_SHOTS,
         interval: int = DEFAULT_INTERVAL,
         plot: bool = True,
@@ -1082,7 +1268,7 @@ class Experiment:
         ----------
         targets : list[str]
             List of targets to check the Rabi oscillation.
-        time_range : NDArray, optional
+        time_range : ArrayLike, optional
             Time range of the experiment in ns.
         shots : int, optional
             Number of shots. Defaults to DEFAULT_SHOTS.
@@ -1100,7 +1286,10 @@ class Experiment:
         --------
         >>> result = ex.obtain_ef_rabi_params(["Q00", "Q01"])
         """
-        ef_labels = [Target.get_ef_label(target) for target in targets]
+        if time_range is None:
+            time_range = np.arange(0, 201, 8)
+
+        ef_labels = [Target.ef_label(target) for target in targets]
         ef_targets = [self.targets[ef] for ef in ef_labels]
 
         ampl = self.params.control_amplitude
@@ -1130,7 +1319,7 @@ class Experiment:
         self,
         *,
         amplitudes: dict[str, float],
-        time_range: NDArray,
+        time_range: ArrayLike,
         detuning: float = 0.0,
         shots: int = DEFAULT_SHOTS,
         interval: int = DEFAULT_INTERVAL,
@@ -1144,7 +1333,7 @@ class Experiment:
         ----------
         amplitudes : dict[str, float]
             Amplitudes of the control pulses.
-        time_range : NDArray
+        time_range : ArrayLike
             Time range of the experiment.
         detuning : float, optional
             Detuning of the control frequency. Defaults to 0.0.
@@ -1166,7 +1355,7 @@ class Experiment:
         --------
         >>> result = ex.rabi_experiment(
         ...     amplitudes={"Q00": 0.1},
-        ...     time_range=np.arange(0, 201, 4),
+        ...     time_range=range(0, 201, 4),
         ...     detuning=0.0,
         ...     shots=1024,
         ... )
@@ -1224,6 +1413,7 @@ class Experiment:
                 data=data.data,
                 time_range=time_range,
                 rabi_param=rabi_params[target],
+                state_centers=self.state_centers.get(target),
             )
             for target, data in sweep_data.items()
         }
@@ -1241,7 +1431,7 @@ class Experiment:
         self,
         *,
         amplitudes: dict[str, float],
-        time_range: NDArray,
+        time_range: ArrayLike,
         detuning: float = 0.0,
         shots: int = DEFAULT_SHOTS,
         interval: int = DEFAULT_INTERVAL,
@@ -1255,7 +1445,7 @@ class Experiment:
         ----------
         amplitudes : dict[str, float]
             Amplitudes of the control pulses.
-        time_range : NDArray
+        time_range : ArrayLike
             Time range of the experiment.
         detuning : float, optional
             Detuning of the control frequency. Defaults to 0.0.
@@ -1277,17 +1467,16 @@ class Experiment:
         --------
         >>> result = ex.ef_rabi_experiment(
         ...     amplitudes={"Q00": 0.1},
-        ...     time_range=np.arange(0, 201, 4),
+        ...     time_range=range(0, 201, 4),
         ...     detuning=0.0,
         ...     shots=1024,
         ... )
         """
         amplitudes = {
-            Target.get_ef_label(label): amplitude
-            for label, amplitude in amplitudes.items()
+            Target.ef_label(label): amplitude for label, amplitude in amplitudes.items()
         }
-        ge_labels = [Target.get_ge_label(label) for label in amplitudes]
-        ef_labels = [Target.get_ef_label(label) for label in amplitudes]
+        ge_labels = [Target.ge_label(label) for label in amplitudes]
+        ef_labels = [Target.ef_label(label) for label in amplitudes]
         ef_targets = [self.targets[ef] for ef in ef_labels]
 
         # drive time range
@@ -1360,7 +1549,7 @@ class Experiment:
         self,
         sequence: ParametricPulseSchedule | ParametricWaveformDict,
         *,
-        sweep_range: NDArray,
+        sweep_range: ArrayLike,
         repetitions: int = 1,
         frequencies: Optional[dict[str, float]] = None,
         rabi_level: Literal["ge", "ef"] = "ge",
@@ -1368,7 +1557,7 @@ class Experiment:
         interval: int = DEFAULT_INTERVAL,
         control_window: int | None = None,
         capture_window: int | None = None,
-        capture_offset: int | None = None,
+        capture_margin: int | None = None,
         plot: bool = True,
         title: str = "Sweep result",
         xaxis_title: str = "Sweep value",
@@ -1383,7 +1572,7 @@ class Experiment:
         ----------
         sequence : ParametricPulseSchedule | ParametricWaveformMap
             Parametric sequence to sweep.
-        sweep_range : NDArray
+        sweep_range : ArrayLike
             Range of the parameter to sweep.
         repetitions : int, optional
             Number of repetitions. Defaults to 1.
@@ -1397,8 +1586,8 @@ class Experiment:
             Control window. Defaults to None.
         capture_window : int, optional
             Capture window. Defaults to None.
-        capture_offset : int, optional
-            Capture offset. Defaults to None.
+        capture_margin : int, optional
+            Capture margin. Defaults to None.
         plot : bool, optional
             Whether to plot the measured signals. Defaults to True.
         title : str, optional
@@ -1427,6 +1616,8 @@ class Experiment:
         ...     plot=True,
         ... )
         """
+        sweep_range = np.array(sweep_range)
+
         if rabi_level == "ge":
             rabi_params = self.ge_rabi_params
         elif rabi_level == "ef":
@@ -1461,28 +1652,51 @@ class Experiment:
                 ]
         else:
             raise ValueError("Invalid sequence.")
+
+        signals = defaultdict(list)
+        plotter = IQPlotter(self.state_centers)
+
         generator = self._measure_batch(
             sequences=sequences,
             shots=shots,
             interval=interval,
             control_window=control_window or self._control_window,
             capture_window=capture_window or self._capture_window,
-            capture_offset=capture_offset or self._capture_offset,
+            capture_margin=capture_margin or self._capture_margin,
         )
-        signals = defaultdict(list)
-        plotter = IQPlotter()
         with self.modified_frequencies(frequencies):
             for result in generator:
                 for target, data in result.data.items():
                     signals[target].append(data.kerneled)
                 if plot:
                     plotter.update(signals)
-        data = {
+
+        # with self.modified_frequencies(frequencies):
+        #     for seq in sequences:
+        #         measure_result = self.measure(
+        #             sequence=seq,
+        #             mode="avg",
+        #             shots=shots,
+        #             interval=interval,
+        #             control_window=control_window,
+        #             capture_window=capture_window,
+        #             capture_margin=capture_margin,
+        #         )
+        #         for target, data in measure_result.data.items():
+        #             signals[target].append(complex(data.kerneled))
+        #         if plot:
+        #             plotter.update(signals)
+
+        if plot:
+            plotter.show()
+
+        sweep_data = {
             target: SweepData(
                 target=target,
                 data=np.array(values),
                 sweep_range=sweep_range,
                 rabi_param=rabi_params.get(target),
+                state_centers=self.state_centers.get(target),
                 title=title,
                 xaxis_title=xaxis_title,
                 yaxis_title=yaxis_title,
@@ -1491,7 +1705,7 @@ class Experiment:
             )
             for target, values in signals.items()
         }
-        result = ExperimentResult(data=data, rabi_params=self.rabi_params)
+        result = ExperimentResult(data=sweep_data, rabi_params=self.rabi_params)
         return result
 
     def repeat_sequence(
@@ -1553,14 +1767,18 @@ class Experiment:
             plot=plot,
             xaxis_title="Number of repetitions",
         )
+
+        if plot:
+            result.plot(normalize=True)
+
         return result
 
     def obtain_freq_rabi_relation(
         self,
         targets: list[str],
         *,
-        detuning_range: NDArray = np.linspace(-0.01, 0.01, 15),
-        time_range: NDArray = np.arange(0, 101, 4),
+        detuning_range: ArrayLike | None = None,
+        time_range: ArrayLike | None = None,
         rabi_level: Literal["ge", "ef"] = "ge",
         shots: int = DEFAULT_SHOTS,
         interval: int = DEFAULT_INTERVAL,
@@ -1573,9 +1791,9 @@ class Experiment:
         ----------
         targets : list[str]
             List of targets to check the Rabi oscillation.
-        detuning_range : NDArray
+        detuning_range : ArrayLike, optional
             Range of the detuning to sweep in GHz.
-        time_range : NDArray
+        time_range : ArrayLike, optional
             Time range of the experiment in ns.
         rabi_level : Literal["ge", "ef"], optional
             Rabi level to use. Defaults to "ge".
@@ -1601,9 +1819,17 @@ class Experiment:
         >>> result = ex.obtain_freq_rabi_relation(
         ...     targets=["Q00", "Q01"],
         ...     detuning_range=np.linspace(-0.01, 0.01, 11),
-        ...     time_range=np.arange(0, 101, 4),
+        ...     time_range=range(0, 101, 4),
         ... )
         """
+        if detuning_range is None:
+            detuning_range = np.linspace(-0.01, 0.01, 15)
+        else:
+            detuning_range = np.array(detuning_range, dtype=np.float64)
+
+        if time_range is None:
+            time_range = np.arange(0, 101, 4)
+
         ampl = self.params.control_amplitude
         rabi_rates: dict[str, list[float]] = defaultdict(list)
         for detuning in detuning_range:
@@ -1662,8 +1888,8 @@ class Experiment:
         self,
         targets: list[str],
         *,
-        amplitude_range: NDArray = np.linspace(0.01, 0.1, 10),
-        time_range: NDArray = np.arange(0, 201, 4),
+        amplitude_range: ArrayLike | None = None,
+        time_range: ArrayLike | None = None,
         shots: int = DEFAULT_SHOTS,
         interval: int = DEFAULT_INTERVAL,
         plot: bool = True,
@@ -1675,9 +1901,9 @@ class Experiment:
         ----------
         targets : list[str]
             List of targets to check the Rabi oscillation.
-        amplitude_range : NDArray
+        amplitude_range : ArrayLike, optional
             Range of the control amplitude to sweep.
-        time_range : NDArray
+        time_range : ArrayLike, optional
             Time range of the experiment in ns.
         shots : int, optional
             Number of shots. Defaults to DEFAULT_SHOTS.
@@ -1701,9 +1927,16 @@ class Experiment:
         >>> result = ex.obtain_ampl_rabi_relation(
         ...     targets=["Q00", "Q01"],
         ...     amplitude_range=np.linspace(0.01, 0.1, 10),
-        ...     time_range=np.arange(0, 201, 4),
+        ...     time_range=range(0, 201, 4),
         ... )
         """
+        if amplitude_range is None:
+            amplitude_range = np.linspace(0.01, 0.1, 10)
+        else:
+            amplitude_range = np.array(amplitude_range, dtype=np.float64)
+
+        if time_range is None:
+            time_range = np.arange(0, 201, 4)
 
         rabi_rates: dict[str, list[float]] = defaultdict(list)
         for amplitude in amplitude_range:
@@ -1737,7 +1970,7 @@ class Experiment:
         self,
         targets: list[str],
         *,
-        time_range: NDArray = np.arange(0, 1024, 128),
+        time_range: ArrayLike | None = None,
         shots: int = DEFAULT_SHOTS,
         interval: int = DEFAULT_INTERVAL,
         plot: bool = True,
@@ -1749,7 +1982,7 @@ class Experiment:
         ----------
         targets : list[str]
             List of targets to check the phase shift.
-        time_range : NDArray, optional
+        time_range : ArrayLike, optional
             The control window range to sweep in ns.
         shots : int, optional
             Number of shots. Defaults to DEFAULT_SHOTS.
@@ -1765,9 +1998,14 @@ class Experiment:
         --------
         >>> result = ex.obtain_time_phase_relation(
         ...     targets=["Q00", "Q01"],
-        ...     time_range=np.arange(0, 1024, 128),
+        ...     time_range=range(0, 1024, 128),
         ... )
         """
+        if time_range is None:
+            time_range = np.arange(0, 1024, 128)
+        else:
+            time_range = np.array(time_range, dtype=np.int64)
+
         iq_data = defaultdict(list)
         plotter = IQPlotter()
         for window in time_range:
@@ -1829,10 +2067,10 @@ class Experiment:
             current_amplitudes = {}
             default_ampl = self.params.control_amplitude
             for target in current_rabi_params:
-                if Target.is_ge_control(target):
+                if self.targets[target].is_ge:
                     current_amplitudes[target] = default_ampl[target]
-                elif Target.is_ef_control(target):
-                    qubit = Target.get_qubit_label(target)
+                elif self.targets[target].is_ef:
+                    qubit = Target.qubit_label(target)
                     current_amplitudes[target] = default_ampl[qubit] / np.sqrt(2)
                 else:
                     raise ValueError("Invalid target.")
@@ -1857,12 +2095,31 @@ class Experiment:
         self,
         targets: list[str],
         *,
-        detuning_range: NDArray = np.linspace(-0.01, 0.01, 15),
-        time_range: NDArray = np.arange(0, 101, 4),
+        detuning_range: ArrayLike | None = None,
+        time_range: ArrayLike | None = None,
+        amplitudes: dict[str, float] | None = None,
         shots: int = DEFAULT_SHOTS,
         interval: int = DEFAULT_INTERVAL,
         plot: bool = True,
     ) -> dict[str, float]:
+        if detuning_range is None:
+            detuning_range = np.linspace(-0.01, 0.01, 15)
+
+        if time_range is None:
+            time_range = np.arange(0, 101, 8)
+
+        # store the original control amplitudes
+        original_control_amplitudes = deepcopy(self.params.control_amplitude)
+
+        if amplitudes is not None:
+            # modify the control amplitudes if necessary
+            for target, amplitude in amplitudes.items():
+                label = Target.qubit_label(target)
+                self.params.control_amplitude[label] = amplitude
+
+        # restore the original control amplitudes
+        self.params.control_amplitude = original_control_amplitudes
+
         result = self.obtain_freq_rabi_relation(
             targets=targets,
             detuning_range=detuning_range,
@@ -1883,12 +2140,18 @@ class Experiment:
         self,
         targets: list[str],
         *,
-        detuning_range: NDArray = np.linspace(-0.01, 0.01, 15),
-        time_range: NDArray = np.arange(0, 101, 4),
+        detuning_range: ArrayLike | None = None,
+        time_range: ArrayLike | None = None,
         shots: int = DEFAULT_SHOTS,
         interval: int = DEFAULT_INTERVAL,
         plot: bool = True,
     ) -> dict[str, float]:
+        if detuning_range is None:
+            detuning_range = np.linspace(-0.01, 0.01, 15)
+
+        if time_range is None:
+            time_range = np.arange(0, 101, 4)
+
         result = self.obtain_freq_rabi_relation(
             targets=targets,
             detuning_range=detuning_range,
@@ -1903,11 +2166,11 @@ class Experiment:
         print("\nResults\n-------")
         print("ef frequency (GHz):")
         for target, fit in fit_data.items():
-            label = Target.get_ge_label(target)
+            label = Target.ge_label(target)
             print(f"    {label}: {fit:.6f}")
         print("anharmonicity (GHz):")
         for target, fit in fit_data.items():
-            label = Target.get_ge_label(target)
+            label = Target.ge_label(target)
             ge_freq = self.targets[label].frequency
             print(f"    {label}: {fit - ge_freq:.6f}")
         return fit_data
@@ -1916,12 +2179,24 @@ class Experiment:
         self,
         targets: list[str],
         *,
-        detuning_range: NDArray = np.linspace(-0.01, 0.01, 15),
-        time_range: NDArray = np.arange(0, 101, 8),
+        detuning_range: ArrayLike | None = None,
+        time_range: ArrayLike | None = None,
+        readout_amplitudes: dict[str, float] | None = None,
         shots: int = DEFAULT_SHOTS,
         interval: int = DEFAULT_INTERVAL,
         plot: bool = True,
     ) -> dict[str, float]:
+        if detuning_range is None:
+            detuning_range = np.linspace(-0.01, 0.01, 15)
+        else:
+            detuning_range = np.array(detuning_range, dtype=np.float64)
+
+        if time_range is None:
+            time_range = np.arange(0, 101, 8)
+
+        # store the original readout amplitudes
+        original_readout_amplitudes = deepcopy(self.params.readout_amplitude)
+
         result = defaultdict(list)
         for detuning in detuning_range:
             modified_frequencies = {
@@ -1929,6 +2204,12 @@ class Experiment:
                 for resonator in self.resonators.values()
             }
             with self.modified_frequencies(modified_frequencies):
+                if readout_amplitudes is not None:
+                    # modify the readout amplitudes if necessary
+                    for target, amplitude in readout_amplitudes.items():
+                        label = Target.qubit_label(target)
+                        self.params.readout_amplitude[label] = amplitude
+
                 rabi_result = self.rabi_experiment(
                     time_range=time_range,
                     amplitudes={
@@ -1944,10 +2225,11 @@ class Experiment:
                     rabi_result.fit()
                 clear_output(wait=True)
                 for qubit, data in rabi_result.data.items():
-                    # rabi_amplitude = data.rabi_param.amplitude
-                    value = data.rotated.imag
-                    rabi_amplitude = max(value) - min(value)
+                    rabi_amplitude = data.rabi_param.amplitude
                     result[qubit].append(rabi_amplitude)
+
+        # restore the original readout amplitudes
+        self.params.readout_amplitude = original_readout_amplitudes
 
         fit_data = {}
         for target, values in result.items():
@@ -1956,6 +2238,7 @@ class Experiment:
                 target=target,
                 freq_range=detuning_range + freq,
                 data=np.array(values),
+                plot=plot,
                 title="Readout frequency calibration",
                 xaxis_title="Readout frequency (GHz)",
             )
@@ -1970,8 +2253,9 @@ class Experiment:
         self,
         targets: list[str],
         pulse_type: Literal["pi", "hpi"],
-        n_rotations: int = 8,
-        shots: int = 3000,
+        n_rotations: int = 1,
+        plot: bool = True,
+        shots: int = DEFAULT_SHOTS,
         interval: int = DEFAULT_INTERVAL,
     ) -> ExperimentResult[AmplCalibData]:
         """
@@ -1984,9 +2268,11 @@ class Experiment:
         pulse_type : Literal["pi", "hpi"]
             Type of the pulse to calibrate.
         n_rotations : int, optional
-            Number of rotations. Defaults to 8.
+            Number of rotations. Defaults to 1.
+        plot : bool, optional
+            Whether to plot the measured signals. Defaults to True.
         shots : int, optional
-            Number of shots. Defaults to 3000.
+            Number of shots. Defaults to DEFAULT_SHOTS.
         interval : int, optional
             Interval between shots. Defaults to DEFAULT_INTERVAL.
 
@@ -2039,6 +2325,7 @@ class Experiment:
                 target=target,
                 amplitude_range=ampl_range,
                 data=-sweep_data.normalized,
+                plot=plot,
                 title=f"{pulse_type} pulse calibration",
             )
 
@@ -2063,8 +2350,8 @@ class Experiment:
         self,
         targets: list[str],
         pulse_type: Literal["pi", "hpi"],
-        n_rotations: int = 2,
-        shots: int = 3000,
+        n_rotations: int = 1,
+        shots: int = DEFAULT_SHOTS,
         interval: int = DEFAULT_INTERVAL,
     ) -> ExperimentResult[AmplCalibData]:
         """
@@ -2077,9 +2364,9 @@ class Experiment:
         pulse_type : Literal["pi", "hpi"]
             Type of the pulse to calibrate.
         n_rotations : int, optional
-            Number of rotations. Defaults to 2.
+            Number of rotations. Defaults to 1.
         shots : int, optional
-            Number of shots. Defaults to 3000.
+            Number of shots. Defaults to DEFAULT_SHOTS.
         interval : int, optional
             Interval between shots. Defaults to DEFAULT_INTERVAL.
 
@@ -2092,11 +2379,11 @@ class Experiment:
         if rabi_params is None:
             raise ValueError("Rabi parameters are not stored.")
 
-        ef_labels = [Target.get_ef_label(label) for label in targets]
+        ef_labels = [Target.ef_label(label) for label in targets]
 
         def calibrate(target: str) -> AmplCalibData:
-            ge_label = Target.get_ge_label(target)
-            ef_label = Target.get_ef_label(target)
+            ge_label = Target.ge_label(target)
+            ef_label = Target.ef_label(target)
 
             if pulse_type == "hpi":
                 pulse = FlatTop(
@@ -2173,8 +2460,9 @@ class Experiment:
         self,
         targets: list[str],
         pulse_type: Literal["pi", "hpi"],
-        n_rotations: int = 8,
-        shots: int = 3000,
+        n_rotations: int = 4,
+        drag_coeff: float = DRAG_COEFF,
+        shots: int = DEFAULT_SHOTS,
         interval: int = DEFAULT_INTERVAL,
     ) -> ExperimentResult[AmplCalibData]:
         """
@@ -2187,9 +2475,11 @@ class Experiment:
         pulse_type : Literal["pi", "hpi"]
             Type of the pulse to calibrate.
         n_rotations : int, optional
-            Number of rotations. Defaults to 8.
+            Number of rotations. Defaults to 4.
+        drag_coeff : float, optional
+            DRAG coefficient. Defaults to DRAG_COEFF.
         shots : int, optional
-            Number of shots. Defaults to 3000.
+            Number of shots. Defaults to DEFAULT_SHOTS.
         interval : int, optional
             Interval between shots. Defaults to DEFAULT_INTERVAL.
 
@@ -2207,7 +2497,7 @@ class Experiment:
                 pulse = Drag(
                     duration=DRAG_HPI_DURATION,
                     amplitude=1,
-                    beta=-DRAG_HPI_LAMBDA / self.qubits[target].anharmonicity,
+                    beta=-drag_coeff / self.qubits[target].alpha,
                 )
                 area = pulse.real.sum() * pulse.SAMPLING_PERIOD
                 rabi_rate = 0.25 / area
@@ -2215,7 +2505,7 @@ class Experiment:
                 pulse = Drag(
                     duration=DRAG_PI_DURATION,
                     amplitude=1,
-                    beta=-DRAG_PI_LAMBDA / self.qubits[target].anharmonicity,
+                    beta=-drag_coeff / self.qubits[target].alpha,
                 )
                 area = pulse.real.sum() * pulse.SAMPLING_PERIOD
                 rabi_rate = 0.5 / area
@@ -2266,8 +2556,8 @@ class Experiment:
     def calibrate_hpi_pulse(
         self,
         targets: list[str],
-        n_rotations: int = 8,
-        shots: int = 3000,
+        n_rotations: int = 1,
+        shots: int = DEFAULT_SHOTS,
         interval: int = DEFAULT_INTERVAL,
     ) -> ExperimentResult[AmplCalibData]:
         """
@@ -2278,9 +2568,9 @@ class Experiment:
         target : str
             Target qubit to calibrate.
         n_rotations : int, optional
-            Number of rotations. Defaults to 8.
+            Number of rotations. Defaults to 1.
         shots : int, optional
-            Number of shots. Defaults to 3000.
+            Number of shots. Defaults to DEFAULT_SHOTS.
         interval : int, optional
             Interval between shots. Defaults to DEFAULT_INTERVAL.
 
@@ -2305,8 +2595,8 @@ class Experiment:
     def calibrate_pi_pulse(
         self,
         targets: list[str],
-        n_rotations: int = 8,
-        shots: int = 3000,
+        n_rotations: int = 1,
+        shots: int = DEFAULT_SHOTS,
         interval: int = DEFAULT_INTERVAL,
     ) -> ExperimentResult[AmplCalibData]:
         """
@@ -2317,9 +2607,9 @@ class Experiment:
         target : str
             Target qubit to calibrate.
         n_rotations : int, optional
-            Number of rotations. Defaults to 8.
+            Number of rotations. Defaults to 1.
         shots : int, optional
-            Number of shots. Defaults to 3000.
+            Number of shots. Defaults to DEFAULT_SHOTS.
         interval : int, optional
             Interval between shots. Defaults to DEFAULT_INTERVAL.
 
@@ -2344,8 +2634,8 @@ class Experiment:
     def calibrate_ef_hpi_pulse(
         self,
         targets: list[str],
-        n_rotations: int = 2,
-        shots: int = 3000,
+        n_rotations: int = 1,
+        shots: int = DEFAULT_SHOTS,
         interval: int = DEFAULT_INTERVAL,
     ) -> ExperimentResult[AmplCalibData]:
         """
@@ -2356,9 +2646,9 @@ class Experiment:
         target : str
             Target qubit to calibrate.
         n_rotations : int, optional
-            Number of rotations. Defaults to 2.
+            Number of rotations. Defaults to 1.
         shots : int, optional
-            Number of shots. Defaults to 3000.
+            Number of shots. Defaults to DEFAULT_SHOTS.
         interval : int, optional
             Interval between shots. Defaults to DEFAULT_INTERVAL.
 
@@ -2383,8 +2673,8 @@ class Experiment:
     def calibrate_ef_pi_pulse(
         self,
         targets: list[str],
-        n_rotations: int = 2,
-        shots: int = 3000,
+        n_rotations: int = 1,
+        shots: int = DEFAULT_SHOTS,
         interval: int = DEFAULT_INTERVAL,
     ) -> ExperimentResult[AmplCalibData]:
         """
@@ -2395,9 +2685,9 @@ class Experiment:
         target : str
             Target qubit to calibrate.
         n_rotations : int, optional
-            Number of rotations. Defaults to 2.
+            Number of rotations. Defaults to 1.
         shots : int, optional
-            Number of shots. Defaults to 3000.
+            Number of shots. Defaults to DEFAULT_SHOTS.
         interval : int, optional
             Interval between shots. Defaults to DEFAULT_INTERVAL.
 
@@ -2422,8 +2712,9 @@ class Experiment:
     def calibrate_drag_hpi_pulse(
         self,
         targets: list[str],
-        n_rotations: int = 8,
-        shots: int = 3000,
+        n_rotations: int = 4,
+        shots: int = DEFAULT_SHOTS,
+        drag_coeff: float = DRAG_COEFF,
         interval: int = DEFAULT_INTERVAL,
     ) -> ExperimentResult[AmplCalibData]:
         """
@@ -2434,9 +2725,11 @@ class Experiment:
         target : str
             Target qubit to calibrate.
         n_rotations : int, optional
-            Number of rotations. Defaults to 8.
+            Number of rotations. Defaults to 4.
+        drag_coeff : float, optional
+            DRAG coefficient. Defaults to DRAG_COEFF.
         shots : int, optional
-            Number of shots. Defaults to 3000.
+            Number of shots. Defaults to DEFAULT_SHOTS.
         interval : int, optional
             Interval between shots. Defaults to DEFAULT_INTERVAL.
 
@@ -2454,15 +2747,18 @@ class Experiment:
         )
 
         ampl = {target: data.calib_value for target, data in result.data.items()}
+        beta = {target: -drag_coeff / self.qubits[target].alpha for target in targets}
         self._system_note.put(DRAG_HPI_AMPLITUDE, ampl)
+        self._system_note.put(DRAG_HPI_BETA, beta)
 
         return result
 
     def calibrate_drag_pi_pulse(
         self,
         targets: list[str],
-        n_rotations: int = 8,
-        shots: int = 3000,
+        n_rotations: int = 4,
+        drag_coeff: float = DRAG_COEFF,
+        shots: int = DEFAULT_SHOTS,
         interval: int = DEFAULT_INTERVAL,
     ) -> ExperimentResult[AmplCalibData]:
         """
@@ -2473,9 +2769,11 @@ class Experiment:
         target : str
             Target qubit to calibrate.
         n_rotations : int, optional
-            Number of rotations. Defaults to 8.
+            Number of rotations. Defaults to 4.
+        drag_coeff : float, optional
+            DRAG coefficient. Defaults to DRAG_COEFF.
         shots : int, optional
-            Number of shots. Defaults to 3000.
+            Number of shots. Defaults to DEFAULT_SHOTS.
         interval : int, optional
             Interval between shots. Defaults to DEFAULT_INTERVAL.
 
@@ -2493,7 +2791,9 @@ class Experiment:
         )
 
         ampl = {target: data.calib_value for target, data in result.data.items()}
+        beta = {target: -drag_coeff / self.qubits[target].alpha for target in targets}
         self._system_note.put(DRAG_PI_AMPLITUDE, ampl)
+        self._system_note.put(DRAG_PI_BETA, beta)
 
         return result
 
@@ -2501,7 +2801,7 @@ class Experiment:
         self,
         targets: list[str],
         *,
-        time_range: NDArray = 2 ** np.arange(1, 18),
+        time_range: ArrayLike | None = None,
         shots: int = DEFAULT_SHOTS,
         interval: int = DEFAULT_INTERVAL,
         plot: bool = True,
@@ -2513,7 +2813,7 @@ class Experiment:
         ----------
         targets : list[str]
             List of qubits to check the T1 decay.
-        time_range : NDArray
+        time_range : ArrayLike, optional
             Time range of the experiment in ns.
         shots : int, optional
             Number of shots. Defaults to DEFAULT_SHOTS.
@@ -2531,10 +2831,13 @@ class Experiment:
         --------
         >>> result = ex.t1_experiment(
         ...     target="Q00",
-        ...     time_range=2 ** np.arange(1, 18),
+        ...     time_range=2 ** np.arange(1, 19),
         ...     shots=1024,
         ... )
         """
+
+        if time_range is None:
+            time_range = 2 ** np.arange(1, 19)
 
         def t1_sequence(T: int) -> PulseSchedule:
             with PulseSchedule(targets) as ps:
@@ -2560,6 +2863,7 @@ class Experiment:
                 target=target,
                 x=data.sweep_range,
                 y=0.5 * (1 - data.normalized),
+                plot=plot,
                 title="T1",
                 xaxis_title="Time (μs)",
                 yaxis_title="Population",
@@ -2580,7 +2884,7 @@ class Experiment:
         self,
         targets: list[str],
         *,
-        time_range: NDArray = 200 * 2 ** np.arange(10),
+        time_range: ArrayLike | None = None,
         n_cpmg: int = 1,
         pi_cpmg: Waveform | None = None,
         shots: int = DEFAULT_SHOTS,
@@ -2594,7 +2898,7 @@ class Experiment:
         ----------
         targets : list[str]
             List of targets to check the T2 decay.
-        time_range : NDArray
+        time_range : ArrayLike, optional
             Time range of the experiment in ns.
         n_cpmg : int, optional
             Number of CPMG pulses. Defaults to 1.
@@ -2612,6 +2916,8 @@ class Experiment:
         ExperimentResult[T2Data]
             Result of the experiment.
         """
+        if time_range is None:
+            time_range = 200 * 2 ** np.arange(12)
 
         data: dict[str, T2Data] = {}
         for target in targets:
@@ -2644,6 +2950,7 @@ class Experiment:
                 target=target,
                 x=sweep_data.sweep_range,
                 y=0.5 * (1 - sweep_data.normalized),
+                plot=plot,
                 title="T2",
                 xaxis_title="Time (μs)",
                 yaxis_title="Population",
@@ -2657,7 +2964,7 @@ class Experiment:
         self,
         targets: list[str],
         *,
-        time_range: NDArray = np.arange(0, 10001, 200),
+        time_range: ArrayLike | None = None,
         detuning: float = 0.001,
         spectator_state: Literal["0", "1", "+", "-", "+i", "-i"] = "0",
         shots: int = DEFAULT_SHOTS,
@@ -2671,7 +2978,7 @@ class Experiment:
         ----------
         targets : list[str]
             List of targets to check the Ramsey oscillation.
-        time_range : NDArray
+        time_range : ArrayLike, optional
             Time range of the experiment in ns.
         detuning : float, optional
             Detuning of the control frequency. Defaults to 0.001 GHz.
@@ -2693,18 +3000,29 @@ class Experiment:
         --------
         >>> result = ex.ramsey_experiment(
         ...     target="Q00",
-        ...     time_range=np.arange(0, 10000, 100),
+        ...     time_range=range(0, 10000, 200),
         ...     shots=1024,
         ... )
         """
+        if time_range is None:
+            time_range = np.arange(0, 10001, 200)
+
         data: dict[str, RamseyData] = {}
         for target in targets:
+            spectators = self.get_spectators(target)
+            if spectator_state != "0":
+                target_list = [target] + [
+                    spectator.label
+                    for spectator in spectators
+                    if spectator.label in self._qubits
+                ]
+            else:
+                target_list = [target]
 
             def ramsey_sequence(T: int) -> PulseSchedule:
-                with PulseSchedule([target]) as ps:
+                with PulseSchedule(target_list) as ps:
                     # Excite spectator qubits if needed
                     if spectator_state != "0":
-                        spectators = self.get_spectators(target)
                         for spectator in spectators:
                             if spectator.label in self._qubits:
                                 pulse = self.get_pulse_for_state(
@@ -2735,6 +3053,7 @@ class Experiment:
                 target=target,
                 x=sweep_data.sweep_range,
                 y=sweep_data.normalized,
+                plot=plot,
             )
             ramsey_data = RamseyData.new(
                 sweep_data=sweep_data,
@@ -2749,7 +3068,7 @@ class Experiment:
         self,
         target: str,
         *,
-        time_range: NDArray = np.arange(0, 10001, 200),
+        time_range: ArrayLike | None = None,
         detuning: float = 0.0005,
         shots: int = DEFAULT_SHOTS,
         interval: int = DEFAULT_INTERVAL,
@@ -2762,7 +3081,7 @@ class Experiment:
         ----------
         target : str
             Target qubit to check the Ramsey oscillation.
-        time_range : NDArray
+        time_range : ArrayLike, optional
             Time range of the experiment in ns.
         detuning : float, optional
             Detuning of the control frequency. Defaults to 0.0005 GHz.
@@ -2782,10 +3101,13 @@ class Experiment:
         --------
         >>> result = ex.obtain_true_control_frequency(
         ...     target="Q00",
-        ...     time_range=np.arange(0, 10000, 100),
+        ...     time_range=range(0, 10000, 100),
         ...     shots=1024,
         ... )
         """
+        if time_range is None:
+            time_range = np.arange(0, 10001, 200)
+
         ramsey_freq_0 = (
             self.ramsey_experiment(
                 targets=[target],
@@ -2828,6 +3150,7 @@ class Experiment:
     def measure_state_distribution(
         self,
         targets: list[str],
+        *,
         n_states: Literal[2, 3] = 2,
         shots: int = DEFAULT_SHOTS,
         interval: int = DEFAULT_INTERVAL,
@@ -2855,12 +3178,21 @@ class Experiment:
 
     def build_classifier(
         self,
-        targets: list[str],
+        targets: list[str] | None = None,
+        *,
         n_states: Literal[2, 3] = 2,
+        shots: int = 1000,
+        interval: int = DEFAULT_INTERVAL,
+        plot: bool = True,
     ):
+        if targets is None:
+            targets = self.qubit_labels
+
         results = self.measure_state_distribution(
             targets=targets,
             n_states=n_states,
+            shots=shots,
+            interval=interval,
             plot=False,
         )
 
@@ -2871,24 +3203,57 @@ class Experiment:
             }
             for target in targets
         }
-        classifiers = {target: StateClassifier.fit(data[target]) for target in targets}
+
+        classifiers: TargetMap[StateClassifier]
+        if self._classifier_type == "kmeans":
+            classifiers = {
+                target: StateClassifierKMeans.fit(data[target]) for target in targets
+            }
+        elif self._classifier_type == "gmm":
+            classifiers = {
+                target: StateClassifierGMM.fit(data[target]) for target in targets
+            }
+        else:
+            raise ValueError("Invalid classifier type.")
         self._measurement.classifiers = classifiers
 
         for target in targets:
             clf = classifiers[target]
-            classified = [
-                clf.classify(target, data[target][state]) for state in range(n_states)
-            ]
+            classified = []
+            for state in range(n_states):
+                if plot:
+                    print(f"{target} prepared as |{state}⟩:")
+                result = clf.classify(
+                    target,
+                    data[target][state],
+                    plot=plot,
+                )
+                classified.append(result)
             fidelity = [
                 classified[state][state] / sum(classified[state].values())
                 for state in range(n_states)
             ]
-            print(f"Readout fidelity of {target}:")
-            for state in range(n_states):
+            if plot:
+                print(f"{target}:")
+                print(f"  Total shots: {shots}")
+                for state in range(n_states):
+                    print(
+                        f"  |{state}⟩ → {classified[state]}, f_{state}: {fidelity[state] * 100:.2f}%"
+                    )
                 print(
-                    f"|{state}⟩ → {classified[state]}, fidelity: {fidelity[state] * 100:.2f}%"
+                    f"  Average readout fidelity : {np.mean(fidelity) * 100:.2f}%\n\n"
                 )
-            print(f"Average readout fidelity: {np.mean(fidelity) * 100:.2f}%")
+
+        self._system_note.put(
+            STATE_CENTERS,
+            {
+                target: {
+                    str(state): (center.real, center.imag)
+                    for state, center in classifiers[target].centers.items()
+                }
+                for target in targets
+            },
+        )
 
     def rb_sequence(
         self,
@@ -2896,8 +3261,10 @@ class Experiment:
         target: str,
         n: int,
         x90: Waveform | None = None,
-        interleave_waveform: Waveform | None = None,
-        interleave_map: dict[str, tuple[complex, str]] | None = None,
+        interleaved_waveform: Waveform | None = None,
+        interleaved_clifford_map: Clifford
+        | dict[str, tuple[complex, str]]
+        | None = None,
         seed: int | None = None,
     ) -> PulseSequence:
         """
@@ -2911,9 +3278,9 @@ class Experiment:
             Number of Clifford gates.
         x90 : Waveform, optional
             π/2 pulse. Defaults to None.
-        interleave_waveform : Waveform, optional
+        interleaved_waveform : Waveform, optional
             Waveform of the interleaved gate. Defaults to None.
-        interleave_map : dict[str, tuple[complex, str]], optional
+        interleaved_clifford_map : Clifford | dict[str, tuple[complex, str]], optional
             Clifford map of the interleaved gate. Defaults to None.
         seed : int, optional
             Random seed.
@@ -2935,8 +3302,8 @@ class Experiment:
         ...     target="Q00",
         ...     n=100,
         ...     x90=Rect(duration=30, amplitude=0.1),
-        ...     interleave_waveform=Rect(duration=30, amplitude=0.1),
-        ...     interleave_map={
+        ...     interleaved_waveform=Rect(duration=30, amplitude=0.1),
+        ...     interleaved_clifford_map={
         ...         "I": (1, "I"),
         ...         "X": (1, "X"),
         ...         "Y": (-1, "Y"),
@@ -2949,20 +3316,22 @@ class Experiment:
 
         sequence: list[Waveform | VirtualZ] = []
 
-        clifford_group = CliffordGroup()
+        generator = CliffordGenerator()
 
-        if interleave_waveform is None:
-            cliffords, inverse = clifford_group.create_rb_sequences(
+        if interleaved_waveform is None:
+            cliffords, inverse = generator.create_rb_sequences(
                 n=n,
+                type="1Q",
                 seed=seed,
             )
         else:
-            if interleave_map is None:
+            if interleaved_clifford_map is None:
                 raise ValueError("Interleave map must be provided.")
-            cliffords, inverse = clifford_group.create_irb_sequences(
+            cliffords, inverse = generator.create_irb_sequences(
                 n=n,
+                interleave=interleaved_clifford_map,
+                type="1Q",
                 seed=seed,
-                interleave=interleave_map,
             )
 
         for clifford in cliffords:
@@ -2971,8 +3340,8 @@ class Experiment:
                     sequence.append(x90)
                 elif gate == "Z90":
                     sequence.append(z90)
-            if interleave_waveform is not None:
-                sequence.append(interleave_waveform)
+            if interleaved_waveform is not None:
+                sequence.append(interleaved_waveform)
 
         for gate in inverse:
             if gate == "X90":
@@ -2985,10 +3354,10 @@ class Experiment:
         self,
         *,
         target: str,
-        n_cliffords_range: NDArray[np.int64] = np.arange(0, 1001, 50),
+        n_cliffords_range: ArrayLike | None = None,
         x90: Waveform | None = None,
-        interleave_waveform: Waveform | None = None,
-        interleave_map: dict[str, tuple[complex, str]] | None = None,
+        interleaved_waveform: Waveform | None = None,
+        interleaved_clifford_map: dict[str, tuple[complex, str]] | None = None,
         spectator_state: Literal["0", "1", "+", "-", "+i", "-i"] = "0",
         seed: int | None = None,
         shots: int = DEFAULT_SHOTS,
@@ -3002,13 +3371,13 @@ class Experiment:
         ----------
         target : str
             Target qubit.
-        n_cliffords_range : NDArray[np.int64], optional
-            Range of the number of Cliffords. Defaults to np.arange(0, 1001, 50).
+        n_cliffords_range : ArrayLike, optional
+            Range of the number of Cliffords. Defaults to range(0, 1001, 50).
         x90 : Waveform, optional
             π/2 pulse. Defaults to None.
-        interleave_waveform : Waveform, optional
+        interleaved_waveform : Waveform, optional
             Waveform of the interleaved gate. Defaults to None.
-        interleave_map : dict[str, tuple[complex, str]], optional
+        interleaved_clifford_map : dict[str, tuple[complex, str]], optional
             Clifford map of the interleaved gate. Defaults to None.
         spectator_state : Literal["0", "1", "+", "-", "+i", "-i"], optional
             Spectator state. Defaults to "0".
@@ -3030,16 +3399,16 @@ class Experiment:
         --------
         >>> result = ex.rb_experiment(
         ...     target="Q00",
-        ...     n_cliffords_range=np.arange(0, 1001, 50),
+        ...     n_cliffords_range=range(0, 1001, 50),
         ...     x90=Rect(duration=30, amplitude=0.1),
         ... )
 
         >>> result = ex.rb_experiment(
         ...     target="Q00",
-        ...     n_cliffords_range=np.arange(0, 1001, 50),
+        ...     n_cliffords_range=range(0, 1001, 50),
         ...     x90=Rect(duration=30, amplitude=0.1),
-        ...     interleave_waveform=Rect(duration=30, amplitude=0.1),
-        ...     interleave_map={
+        ...     interleaved_waveform=Rect(duration=30, amplitude=0.1),
+        ...     interleaved_clifford_map={
         ...         "I": (1, "I"),
         ...         "X": (1, "X"),
         ...         "Y": (-1, "Y"),
@@ -3047,6 +3416,9 @@ class Experiment:
         ...     },
         ... )
         """
+
+        if n_cliffords_range is None:
+            n_cliffords_range = np.arange(0, 1001, 50)
 
         def rb_sequence(N: int) -> PulseSchedule:
             with PulseSchedule([target]) as ps:
@@ -3069,8 +3441,8 @@ class Experiment:
                         target=target,
                         n=N,
                         x90=x90,
-                        interleave_waveform=interleave_waveform,
-                        interleave_map=interleave_map,
+                        interleaved_waveform=interleaved_waveform,
+                        interleaved_clifford_map=interleaved_clifford_map,
                         seed=seed,
                     ),
                 )
@@ -3081,7 +3453,7 @@ class Experiment:
             sweep_range=n_cliffords_range,
             shots=shots,
             interval=interval,
-            plot=plot,
+            plot=False,
         )
 
         sweep_data = sweep_result.data[target]
@@ -3095,6 +3467,7 @@ class Experiment:
             yaxis_title="Z expectation value",
             xaxis_type="linear",
             yaxis_type="linear",
+            plot=plot,
         )
 
         data = {
@@ -3113,7 +3486,7 @@ class Experiment:
         self,
         target: str,
         *,
-        n_cliffords_range: NDArray[np.int64] = np.arange(0, 1001, 100),
+        n_cliffords_range: ArrayLike | None = None,
         n_trials: int = 30,
         x90: Waveform | None = None,
         spectator_state: Literal["0", "1", "+", "-", "+i", "-i"] = "0",
@@ -3128,8 +3501,8 @@ class Experiment:
         ----------
         target : str
             Target qubit.
-        n_cliffords_range : NDArray[np.int64], optional
-            Range of the number of Cliffords. Defaults to np.arange(0, 1001, 100).
+        n_cliffords_range : ArrayLike, optional
+            Range of the number of Cliffords. Defaults to range(0, 1001, 100).
         n_trials : int, optional
             Number of trials for different random seeds. Defaults to 30.
         x90 : Waveform, optional
@@ -3150,6 +3523,11 @@ class Experiment:
         dict
             Results of the experiment.
         """
+        if n_cliffords_range is None:
+            n_cliffords_range = np.arange(0, 1001, 100)
+        else:
+            n_cliffords_range = np.array(n_cliffords_range, dtype=int)
+
         self._validate_rabi_params()
 
         results = []
@@ -3197,9 +3575,9 @@ class Experiment:
         self,
         *,
         target: str,
-        interleave_waveform: Waveform,
-        interleave_map: dict[str, tuple[complex, str]],
-        n_cliffords_range: NDArray[np.int64] = np.arange(0, 1001, 100),
+        interleaved_waveform: Waveform,
+        interleaved_clifford_map: dict[str, tuple[complex, str]],
+        n_cliffords_range: ArrayLike | None = None,
         n_trials: int = 30,
         x90: Waveform | None = None,
         spectator_state: Literal["0", "1", "+", "-", "+i", "-i"] = "0",
@@ -3215,12 +3593,12 @@ class Experiment:
         ----------
         target : str
             Target qubit.
-        interleave_waveform : Waveform
+        interleaved_waveform : Waveform
             Waveform of the interleaved gate.
-        interleave_map : dict[str, tuple[complex, str]]
+        interleaved_clifford_map : dict[str, tuple[complex, str]]
             Clifford map of the interleaved gate.
-        n_cliffords_range : NDArray[np.int64], optional
-            Range of the number of Cliffords. Defaults to np.arange(0, 1001, 100).
+        n_cliffords_range : ArrayLike, optional
+            Range of the number of Cliffords. Defaults to range(0, 1001, 100).
         n_trials : int, optional
             Number of trials for different random seeds. Defaults to 30.
         x90 : Waveform, optional
@@ -3240,7 +3618,33 @@ class Experiment:
         -------
         dict
             Results of the experiment.
+
+        Examples
+        --------
+        >>> result = ex.interleaved_randomized_benchmarking(
+        ...     target="Q00",
+        ...     interleaved_waveform=Rect(duration=30, amplitude=0.1),
+        ...     interleaved_clifford_map={
+        ...         "I": (1, "I"),
+        ...         "X": (1, "X"),
+        ...         "Y": (1, "Z"),
+        ...         "Z": (-1, "Y"),
+        ...     },
+        ...     n_cliffords_range=range(0, 1001, 100),
+        ...     n_trials=30,
+        ...     x90=Rect(duration=30, amplitude=0.1),
+        ...     spectator_state="0",
+        ...     show_ref=True,
+        ...     shots=1024,
+        ...     interval=1024,
+        ...     plot=True,
+        ... )
         """
+        if n_cliffords_range is None:
+            n_cliffords_range = np.arange(0, 1001, 100)
+        else:
+            n_cliffords_range = np.array(n_cliffords_range, dtype=int)
+
         rb_results = []
         irb_results = []
         seeds = np.random.randint(0, 2**32, n_trials)
@@ -3254,15 +3658,15 @@ class Experiment:
                     seed=seed,
                     shots=shots,
                     interval=interval,
-                    plot=plot,
+                    plot=False,
                 )
                 rb_results.append(rb_result.data[target].normalized)
             irb_result = self.rb_experiment(
                 target=target,
                 n_cliffords_range=n_cliffords_range,
                 x90=x90,
-                interleave_waveform=interleave_waveform,
-                interleave_map=interleave_map,
+                interleaved_waveform=interleaved_waveform,
+                interleaved_clifford_map=interleaved_clifford_map,
                 spectator_state=spectator_state,
                 seed=seed,
                 shots=shots,
@@ -3280,7 +3684,7 @@ class Experiment:
                 x=n_cliffords_range,
                 y=rb_mean,
                 error_y=rb_std,
-                plot=True,
+                plot=False,
                 title="Randomized benchmarking",
             )
             p_rb = rb_fit_result[0]
@@ -3352,7 +3756,9 @@ class Experiment:
         elif not isinstance(sequence, Waveform):
             raise ValueError("Invalid sequence.")
 
-        x90 = x90 or self.hpi_pulse[target]
+        qubit = Target.qubit_label(target)
+
+        x90 = x90 or self.hpi_pulse[qubit]
         y90m = x90.shifted(-np.pi / 2)
 
         if basis == "X":
@@ -3595,14 +4001,158 @@ class Experiment:
 
         return result
 
+    def measure_phase_shift_by_transmission_line(
+        self,
+        target: str,
+        *,
+        frequency_range: ArrayLike = np.arange(10.05, 10.1, 0.002),
+        amplitude: float = 0.01,
+        subrange_width: float = 0.3,
+        shots: int = 100,
+        interval: int = 0,
+        plot: bool = True,
+    ) -> float:
+        """
+        Measures the phase shift caused by the length of the transmission line.
+
+        Parameters
+        ----------
+        target : str
+            Target qubit connected to the resonator of interest.
+        frequency_range : ArrayLike, optional
+            Frequency range of the scan in GHz.
+        amplitude : float, optional
+            Amplitude of the readout pulse. Defaults to 0.01.
+        shots : int, optional
+            Number of shots. Defaults to 100.
+        interval : int, optional
+            Interval between shots. Defaults to 0.
+        plot : bool, optional
+            Whether to plot the measured signals. Defaults to True.
+
+        Returns
+        -------
+        float
+            Phase shift in rad/GHz.
+        """
+        read_label = Target.read_label(target)
+        qubit_label = Target.qubit_label(target)
+        mux = self.experiment_system.get_mux_by_qubit(qubit_label)
+
+        # split frequency range to avoid the frequency sweep range limit
+        frequency_range = np.array(frequency_range)
+        subranges = ExperimentUtil.split_frequency_range(
+            frequency_range=frequency_range,
+            subrange_width=subrange_width,
+        )
+
+        # create a figure widget
+        if plot:
+            widget = go.FigureWidget()
+            widget.add_scatter(name=target, mode="markers+lines")
+            widget.update_layout(
+                title=f"Phase shift by transmission line : {mux.label}",
+                xaxis_title="Frequency (GHz)",
+                yaxis_title="Unwrapped phase (rad)",
+                showlegend=False,
+            )
+            scatter: go.Scatter = widget.data[0]  # type: ignore
+            display(widget)
+
+        # result buffer
+        phases: list[float] = []
+        # measure phase shift
+        idx = 0
+
+        # phase offset to avoid the phase jump after changing the LO/NCO frequency
+        phase_offset = 0.0
+
+        for subrange in subranges:
+            # change LO/NCO frequency to the center of the subrange
+            f_center = (subrange[0] + subrange[-1]) / 2
+            lo, cnco, _ = MixingUtil.calc_lo_cnco(
+                f_center * 1e9,
+                ssb="U",
+                cnco_center=1_500_000_000,
+            )
+            with self.state_manager.modified_device_settings(
+                label=read_label,
+                lo_freq=lo,
+                cnco_freq=cnco,
+                fnco_freq=0,
+            ):
+                for sub_idx, freq in enumerate(tqdm(subrange)):
+                    if idx > 0 and sub_idx == 0:
+                        # measure the phase at the previous frequency with the new LO/NCO settings
+                        with self.modified_frequencies(
+                            {read_label: frequency_range[idx - 1]}
+                        ):
+                            new_result = self.measure(
+                                {qubit_label: np.zeros(0)},
+                                mode="avg",
+                                readout_amplitudes={qubit_label: amplitude},
+                                shots=shots,
+                                interval=interval,
+                                plot=False,
+                            )
+                            new_signal = new_result.data[target].kerneled
+                            new_phase = np.angle(new_signal)
+                            phase_offset = new_phase - phases[-1]  # type: ignore
+
+                    with self.modified_frequencies({read_label: freq}):
+                        result = self.measure(
+                            {qubit_label: np.zeros(0)},
+                            mode="avg",
+                            readout_amplitudes={qubit_label: amplitude},
+                            shots=shots,
+                            interval=interval,
+                            plot=False,
+                        )
+                        signal = result.data[target].kerneled
+                        phase = np.angle(signal)
+                        phase = phase - phase_offset
+                        phases.append(phase)  # type: ignore
+
+                        idx += 1
+
+                        if plot:
+                            scatter.x = frequency_range[:idx]
+                            scatter.y = np.unwrap(phases)
+
+        # fit the phase shift
+        x, y = frequency_range, np.unwrap(phases)
+        coefficients = np.polyfit(x, y, 1)
+        y_fit = np.polyval(coefficients, x)
+
+        if plot:
+            fig = go.Figure()
+            fig.add_scatter(name="data", mode="markers", x=x, y=y)
+            fig.add_scatter(name="fit", mode="lines", x=x, y=y_fit)
+            fig.update_layout(
+                title=f"Phase shift by transmission line : {mux.label}",
+                xaxis_title="Frequency (GHz)",
+                yaxis_title="Unwrapped phase (rad)",
+                showlegend=True,
+            )
+            fig.show()
+
+        # return the phase shift
+        phase_shift = coefficients[0]
+        print(f"phase_shift: {phase_shift} [rad/GHz]")
+        return phase_shift
+
     def scan_resonator_frequencies(
         self,
         target: str,
         *,
-        freq_range: NDArray[np.float64] = np.arange(9.8, 10.3, 0.002),
+        frequency_range: ArrayLike | None = np.arange(10.1, 10.7, 0.002),
+        phase_shift: float | None = None,
+        amplitude: float = 0.01,
+        subrange_width: float = 0.3,
         shots: int = 100,
         interval: int = 0,
-    ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+        plot: bool = True,
+    ) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.complex128]]:
         """
         Scans the readout frequencies to find the resonator frequencies.
 
@@ -3610,96 +4160,294 @@ class Experiment:
         ----------
         target : str
             Target qubit connected to the resonator of interest.
-        freq_range : NDArray[np.float64], optional
-            Frequency range to scan in GHz. Defaults to np.arange(9.8, 10.3, 0.002).
+        frequency_range : ArrayLike, optional
+            Frequency range of the scan in GHz.
+        phase_shift : float, optional
+            Phase shift in rad/GHz. If None, it will be measured.
+        amplitude : float, optional
+            Amplitude of the readout pulse. Defaults to 0.01.
+        subrange_width : float, optional
+            Width of the frequency subrange in GHz. Defaults to 0.3.
         shots : int, optional
             Number of shots. Defaults to 100.
         interval : int, optional
             Interval between shots. Defaults to 0.
+        plot : bool, optional
+            Whether to plot the measured signals. Defaults to True.
 
         Returns
         -------
-        tuple[NDArray[np.float64], NDArray[np.float64]]
-            Frequency range and phase difference.
+        tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.complex128]]
+            Frequency range, phase difference and raw complex signals.
         """
-        readout = Target.get_readout_label(target)
+        # measure phase shift if not provided
+        if phase_shift is None:
+            phase_shift = self.measure_phase_shift_by_transmission_line(
+                target,
+                amplitude=amplitude,
+                shots=shots,
+                interval=interval,
+                plot=False,
+            )
 
-        def measure_phases(freq_range, phase_shift=0.0) -> NDArray[np.float64]:
+        read_label = Target.read_label(target)
+        qubit_label = Target.qubit_label(target)
+        mux = self.experiment_system.get_mux_by_qubit(qubit_label)
+
+        # split frequency range to avoid the frequency sweep range limit
+        frequency_range = np.array(frequency_range)
+        subranges = ExperimentUtil.split_frequency_range(
+            frequency_range=frequency_range,
+            subrange_width=subrange_width,
+        )
+
+        if plot:
+            fig = make_subplots(
+                rows=2,
+                cols=1,
+                shared_xaxes=True,
+                vertical_spacing=0.05,
+                # subplot_titles=["Phase", "Amplitude"],
+            )
+            widget = go.FigureWidget(fig)
+            widget.add_scatter(name=target, mode="markers+lines", row=1, col=1)
+            widget.add_scatter(name=target, mode="markers+lines", row=2, col=1)
+            widget.update_xaxes(title_text="Readout frequency (GHz)", row=2, col=1)
+            widget.update_yaxes(title_text="Unwrapped phase (rad)", row=1, col=1)
+            widget.update_yaxes(title_text="Amplitude (arb. units)", row=2, col=1)
+            widget.update_layout(
+                title=f"Resonator frequency scan : {mux.label}",
+                height=450,
+                showlegend=False,
+            )
+            scatter_phase: go.Scatter = widget.data[0]  # type: ignore
+            scatter_amplitude: go.Scatter = widget.data[1]  # type: ignore
+            display(widget)
+
+        phases: list[float] = []
+        signals: list[complex] = []
+
+        idx = 0
+        phase_offset = 0.0
+
+        for subrange in subranges:
+            f_center = (subrange[0] + subrange[-1]) / 2
+            lo, cnco, _ = MixingUtil.calc_lo_cnco(
+                f_center * 1e9,
+                ssb="U",
+                cnco_center=1_500_000_000,
+            )
+            with self.state_manager.modified_device_settings(
+                label=read_label,
+                lo_freq=lo,
+                cnco_freq=cnco,
+                fnco_freq=0,
+            ):
+                for sub_idx, freq in enumerate(tqdm(subrange)):
+                    if idx > 0 and sub_idx == 0:
+                        prev_freq = frequency_range[idx - 1]
+                        with self.modified_frequencies({read_label: prev_freq}):
+                            new_result = self.measure(
+                                {qubit_label: np.zeros(0)},
+                                mode="avg",
+                                readout_amplitudes={qubit_label: amplitude},
+                                shots=shots,
+                                interval=interval,
+                            )
+                            new_signal = new_result.data[target].kerneled
+                            new_phase = np.angle(new_signal) - prev_freq * phase_shift
+                            phase_offset = new_phase - phases[-1]  # type: ignore
+
+                    with self.modified_frequencies({read_label: freq}):
+                        result = self.measure(
+                            {qubit_label: np.zeros(0)},
+                            mode="avg",
+                            readout_amplitudes={qubit_label: amplitude},
+                            shots=shots,
+                            interval=interval,
+                        )
+
+                        raw = result.data[target].kerneled
+                        ampl = np.abs(raw)
+                        phase = np.angle(raw)
+                        phase = phase - freq * phase_shift - phase_offset
+                        signal = ampl * np.exp(1j * phase)
+                        signals.append(signal)
+                        phases.append(phase)  # type: ignore
+
+                        idx += 1
+
+                        if plot:
+                            scatter_phase.x = frequency_range[:idx]
+                            scatter_phase.y = np.unwrap(phases)
+                            scatter_amplitude.x = frequency_range[:idx]
+                            scatter_amplitude.y = np.abs(signals)
+
+        phases_unwrap = np.unwrap(phases)
+        phases_diff = np.abs(np.diff(phases_unwrap))
+
+        if plot:
+            fig1 = make_subplots(
+                rows=2,
+                cols=1,
+                shared_xaxes=True,
+                vertical_spacing=0.05,
+                # subplot_titles=["Phase", "Amplitude"],
+            )
+            fig1.add_scatter(
+                name=target,
+                mode="markers+lines",
+                row=1,
+                col=1,
+                x=frequency_range,
+                y=phases_unwrap,
+            )
+            fig1.add_scatter(
+                name=target,
+                mode="markers+lines",
+                row=2,
+                col=1,
+                x=frequency_range,
+                y=np.abs(signals),
+            )
+            fig1.update_xaxes(title_text="Readout frequency (GHz)", row=2, col=1)
+            fig1.update_yaxes(title_text="Unwrapped phase (rad)", row=1, col=1)
+            fig1.update_yaxes(title_text="Amplitude (arb. units)", row=2, col=1)
+            fig1.update_layout(
+                title=f"Resonator frequency scan : {mux.label}",
+                height=450,
+                showlegend=False,
+            )
+            fig1.show()
+
+            fig2 = go.Figure()
+            fig2.add_scatter(
+                name=target,
+                mode="markers+lines",
+                x=frequency_range,
+                y=phases_diff,
+            )
+            fig2.update_layout(
+                title=f"Resonator frequency scan : {mux.label}",
+                xaxis_title="Readout frequency (GHz)",
+                yaxis_title="Phase diff (rad)",
+            )
+            fig2.show()
+
+        return frequency_range, phases_diff, np.array(signals)
+
+    def measure_reflection_coefficient(
+        self,
+        target: str,
+        *,
+        frequency_range: ArrayLike,
+        phase_shift: float,
+        amplitude: float = 0.01,
+        shots: int = 100,
+        interval: int = 0,
+        plot: bool = True,
+    ) -> tuple[NDArray[np.float64], NDArray[np.complex128], float, float, float]:
+        """
+        Scans the readout frequencies to find the resonator frequencies.
+
+        Parameters
+        ----------
+        target : str
+            Target qubit connected to the resonator of interest.
+        frequency_range : ArrayLike
+            Frequency range of the scan in GHz.
+        phase_shift : float
+            Phase shift in rad/GHz.
+        amplitude : float, optional
+            Amplitude of the readout pulse. Defaults to 0.01.
+        shots : int, optional
+            Number of shots. Defaults to 100.
+        interval : int, optional
+            Interval between shots. Defaults to 0.
+        plot : bool, optional
+            Whether to plot the measured signals. Defaults to True.
+
+        Returns
+        -------
+        tuple[NDArray[np.float64], NDArray[np.complex128], float, float, float]
+            Frequency range and reflection coefficients (complex), resonator frequency, external coupling rate, internal coupling rate.
+        """
+        freq_range = np.array(frequency_range)
+        center_frequency = np.mean(freq_range).astype(float)
+        frequency_width = (freq_range[-1] - freq_range[0]).astype(float)
+
+        if frequency_width > 0.4:
+            raise ValueError("Frequency scan range must be less than 400 MHz.")
+
+        read_label = Target.read_label(target)
+        qubit_label = Target.qubit_label(target)
+
+        if plot:
             widget = go.FigureWidget()
             widget.add_scatter(name=target, mode="markers+lines")
             widget.update_layout(
-                title="Resonator frequency scan",
-                xaxis_title="Readout frequency (GHz)",
+                title=f"Phase of reflection wave : {qubit_label}",
+                xaxis_title="Frequency (GHz)",
                 yaxis_title="Phase (rad)",
             )
             scatter: go.Scatter = widget.data[0]  # type: ignore
             display(widget)
-            phases = []
+
+        lo, cnco, _ = MixingUtil.calc_lo_cnco(
+            center_frequency * 1e9,
+            ssb="U",
+            cnco_center=1_500_000_000,
+        )
+
+        signals = []
+
+        with self.state_manager.modified_device_settings(
+            label=read_label,
+            lo_freq=lo,
+            cnco_freq=cnco,
+            fnco_freq=0,
+        ):
             for idx, freq in enumerate(tqdm(freq_range)):
-                with self.modified_frequencies({readout: freq}):
+                with self.modified_frequencies({read_label: freq}):
                     result = self.measure(
-                        {target: np.zeros(0)},
+                        {qubit_label: np.zeros(0)},
                         mode="avg",
+                        readout_amplitudes={qubit_label: amplitude},
                         shots=shots,
                         interval=interval,
                     )
-                    iq = result.data[target].kerneled
-                    angle = np.angle(iq)
-                    angle = np.angle(iq) - freq * phase_shift
-                    phases.append(angle)
-                    scatter.x = freq_range[: idx + 1]
-                    scatter.y = np.unwrap(phases)
-            return np.unwrap(phases)
+                    signal = result.data[target].kerneled
+                    signal = signal * np.exp(-1j * freq * phase_shift)
+                    signals.append(signal)
+                    if plot:
+                        scatter.x = freq_range[: idx + 1]
+                        scatter.y = np.unwrap(np.angle(signals))
 
-        def measure_phase_shift(freq_range) -> float:
-            phases = measure_phases(freq_range)
-            x, y = freq_range, np.unwrap(phases)
-            coefficients = np.polyfit(x, y, 1)
-            y_fit = np.polyval(coefficients, x)
-            fig = go.Figure()
-            fig.add_scatter(name=target, mode="markers", x=x, y=y)
-            fig.add_scatter(name="fit", mode="lines", x=x, y=y_fit)
-            fig.update_layout(
-                title="Resonator frequency scan",
-                xaxis_title="Readout frequency (GHz)",
-                yaxis_title="Phase (rad)",
-            )
-            fig.show()
-            phase_shift = coefficients[0]
-            print(f"phase_shift: {phase_shift} rad/GHz")
-            return phase_shift
+        phi = (np.angle(signals[0]) + np.angle(signals[-1])) / 2
+        coeffs = np.array(signals) * np.exp(-1j * phi)
 
-        phase_shift = measure_phase_shift(freq_range[0:30])
-        phases = measure_phases(freq_range, phase_shift=phase_shift)
-        phases_diff = np.abs(np.diff(phases))
-
-        fig = go.Figure()
-        fig.add_scatter(
-            name=target,
-            mode="markers+lines",
-            x=freq_range,
-            y=phases_diff,
+        f_r, kappa_ex, kappa_in = fitting.fit_reflection_coefficient(
+            target=target,
+            freq_range=freq_range,
+            data=coeffs,
+            plot=plot,
         )
-        fig.update_layout(
-            title="Resonator frequency scan",
-            xaxis_title="Readout frequency (GHz)",
-            yaxis_title="Phase diff (rad)",
-        )
-        fig.show()
 
-        return freq_range, phases_diff
+        return freq_range, coeffs, f_r, kappa_ex, kappa_in
 
     def scan_qubit_frequencies(
         self,
         target: str,
         *,
-        center_frequency: float,
-        frequency_step: float = 0.005,
+        frequency_range: ArrayLike | None = None,
         control_amplitude: float = 0.01,
         readout_amplitude: float = 0.01,
+        readout_frequency: float | None = None,
+        subrange_width: float = 0.3,
         shots: int = 1000,
         interval: int = 0,
-    ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+        plot: bool = True,
+    ) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
         """
         Scans the control frequencies to find the qubit frequencies.
 
@@ -3707,42 +4455,29 @@ class Experiment:
         ----------
         target : str
             Target qubit.
-        center_frequency : float
-            Center frequency of the control pulse in GHz.
-        frequency_step : float, optional
-            Frequency step of the scan in GHz.
+        frequency_range : ArrayLike, optional
+            Frequency range of the scan in GHz.
         control_amplitude : float, optional
             Amplitude of the control pulse. Defaults to 0.01.
         readout_amplitude : float, optional
             Amplitude of the readout pulse. Defaults to 0.01.
+        subrange_width : float, optional
+            Width of the frequency subrange in GHz. Defaults to 0.3.
         shots : int, optional
             Number of shots.
         interval : int, optional
             Interval between shots.
+        plot : bool, optional
+            Whether to plot the measured signals. Defaults to True.
 
         Returns
         -------
-        tuple[NDArray[np.float64], NDArray[np.float64]]
-            Frequency range and phases.
+        tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]
+            Frequency range, unwrapped phase and amplitude.
         """
-        widget = go.FigureWidget()
-        widget.add_scatter(name=target, mode="markers+lines")
-        widget.update_layout(
-            title="Qubit frequency scan",
-            xaxis_title="Control frequency (GHz)",
-            yaxis_title="Phase (rad)",
-        )
-        scatter: go.Scatter = widget.data[0]  # type: ignore
-        display(widget)
-        phases = []
-        freq_range = np.arange(
-            center_frequency - 0.25,
-            center_frequency + 0.25,
-            frequency_step,
-        )
-
-        qubit = target
-        resonator = Target.get_readout_label(target)
+        # control and readout pulses
+        qubit = Target.qubit_label(target)
+        resonator = Target.read_label(target)
         control_pulse = Gaussian(
             duration=1024,
             amplitude=control_amplitude,
@@ -3753,29 +4488,127 @@ class Experiment:
             amplitude=readout_amplitude,
             tau=128,
         )
-        for idx, freq in enumerate(tqdm(freq_range)):
-            with self.modified_frequencies({qubit: freq}):
-                with PulseSchedule([qubit, resonator]) as ps:
-                    ps.add(qubit, control_pulse)
-                    ps.add(resonator, readout_pulse)
-                result = self.execute(
-                    schedule=ps,
-                    mode="avg",
-                    shots=shots,
-                    interval=interval,
-                )
-                iq = result.data[qubit].kerneled
-                angle = np.angle(iq)
-                phases.append(angle)
-                scatter.x = freq_range[: idx + 1]
-                scatter.y = np.unwrap(phases)
 
-        return freq_range, np.unwrap(phases)
+        # prepare the plot
+        if plot:
+            fig = make_subplots(
+                rows=2,
+                cols=1,
+                shared_xaxes=True,
+                vertical_spacing=0.05,
+            )
+            widget = go.FigureWidget(fig)
+            widget.add_scatter(name=target, mode="markers+lines", row=1, col=1)
+            widget.add_scatter(name=target, mode="markers+lines", row=2, col=1)
+            widget.update_xaxes(title_text="Control frequency (GHz)", row=2, col=1)
+            widget.update_yaxes(title_text="Unwrapped phase (rad)", row=1, col=1)
+            widget.update_yaxes(title_text="Amplitude (arb. units)", row=2, col=1)
+            widget.update_layout(
+                title=f"Control frequency scan : {qubit}",
+                height=450,
+                showlegend=False,
+            )
+            scatter_phase: go.Scatter = widget.data[0]  # type: ignore
+            scatter_amplitude: go.Scatter = widget.data[1]  # type: ignore
+            display(widget)
+
+        # split frequency range to avoid the frequency sweep range limit
+        frequency_range = np.array(frequency_range)
+        subranges = ExperimentUtil.split_frequency_range(
+            frequency_range=frequency_range,
+            subrange_width=subrange_width,
+        )
+
+        # readout frequency
+        readout_frequency = readout_frequency or self.targets[resonator].frequency
+
+        # result buffer
+        phases = []
+        amplitudes = []
+
+        # measure the phase and amplitude
+        idx = 0
+        for subrange in subranges:
+            f_center = (subrange[0] + subrange[-1]) / 2
+            lo, cnco, _ = MixingUtil.calc_lo_cnco(
+                f_center * 1e9,
+                ssb="L",
+                cnco_center=2_250_000_000,
+            )
+            with self.state_manager.modified_device_settings(
+                label=qubit,
+                lo_freq=lo,
+                cnco_freq=cnco,
+                fnco_freq=0,
+            ):
+                for control_frequency in tqdm(subrange):
+                    with self.modified_frequencies(
+                        {
+                            qubit: control_frequency,
+                            resonator: readout_frequency,
+                        }
+                    ):
+                        with PulseSchedule([qubit, resonator]) as ps:
+                            ps.add(qubit, control_pulse)
+                            ps.add(resonator, readout_pulse)
+                        result = self.execute(
+                            schedule=ps,
+                            mode="avg",
+                            shots=shots,
+                            interval=interval,
+                        )
+                        signal = result.data[qubit].kerneled
+                        phases.append(np.angle(signal))
+                        amplitudes.append(np.abs(signal))
+
+                        idx += 1
+
+                        if plot:
+                            scatter_phase.x = frequency_range[:idx]
+                            scatter_phase.y = np.unwrap(phases)
+                            scatter_amplitude.x = frequency_range[:idx]
+                            scatter_amplitude.y = amplitudes
+
+        if plot:
+            fig = make_subplots(
+                rows=2,
+                cols=1,
+                shared_xaxes=True,
+                vertical_spacing=0.05,
+            )
+            fig.add_scatter(
+                name=target,
+                mode="markers+lines",
+                row=1,
+                col=1,
+                x=frequency_range,
+                y=np.unwrap(phases),
+            )
+            fig.add_scatter(
+                name=target,
+                mode="markers+lines",
+                row=2,
+                col=1,
+                x=frequency_range,
+                y=amplitudes,
+            )
+            fig.update_xaxes(title_text="Control frequency (GHz)", row=2, col=1)
+            fig.update_yaxes(title_text="Unwrapped phase (rad)", row=1, col=1)
+            fig.update_yaxes(title_text="Amplitude (arb. units)", row=2, col=1)
+            fig.update_layout(
+                title=f"Control frequency scan : {qubit}",
+                height=450,
+                showlegend=False,
+            )
+            fig.show()
+
+        return frequency_range, np.unwrap(phases), np.asarray(amplitudes)
 
     def measure_population(
         self,
         sequence: TargetMap[IQArray] | TargetMap[Waveform] | PulseSchedule,
         *,
+        fit_gmm: bool = False,
         shots: int = DEFAULT_SHOTS,
         interval: int = DEFAULT_INTERVAL,
     ) -> tuple[dict[str, NDArray[np.float64]], dict[str, NDArray[np.float64]]]:
@@ -3786,6 +4619,8 @@ class Experiment:
         ----------
         sequence : TargetMap[IQArray] | TargetMap[Waveform] | PulseSchedule
             Sequence to measure for each target.
+        fit_gmm : bool, optional
+            Whether to fit the data with a Gaussian mixture model. Defaults to False
         shots : int, optional
             Number of shots. Defaults to DEFAULT_SHOTS.
         interval : int, optional
@@ -3802,7 +4637,7 @@ class Experiment:
         ...     "Q00": ex.hpi_pulse["Q00"],
         ...     "Q01": ex.hpi_pulse["Q01"],
         ... }
-        >>> probs = ex.measure_population(sequence)
+        >>> result = ex.measure_population(sequence)
         """
         if self.classifiers is None:
             raise ValueError("Classifiers are not built. Run `build_classifier` first.")
@@ -3813,12 +4648,23 @@ class Experiment:
             shots=shots,
             interval=interval,
         )
-        probabilities = {
-            target: data.probabilities for target, data in result.data.items()
-        }
-        standard_deviations = {
-            target: data.standard_deviations for target, data in result.data.items()
-        }
+        if fit_gmm:
+            probabilities = {
+                target: self.classifiers[target].estimate_weights(
+                    result.data[target].kerneled
+                )
+                for target in result.data
+            }
+            standard_deviations = {
+                target: np.zeros_like(probabilities[target]) for target in probabilities
+            }
+        else:
+            probabilities = {
+                target: data.probabilities for target, data in result.data.items()
+            }
+            standard_deviations = {
+                target: data.standard_deviations for target, data in result.data.items()
+            }
         return probabilities, standard_deviations
 
     def measure_population_dynamics(
@@ -3826,6 +4672,7 @@ class Experiment:
         *,
         sequence: ParametricPulseSchedule | ParametricWaveformDict,
         params_list: Sequence | NDArray,
+        fit_gmm: bool = False,
         xlabel: str = "Index",
         scatter_mode: str = "lines+markers",
         show_error: bool = True,
@@ -3841,6 +4688,8 @@ class Experiment:
             Parametric sequence to measure.
         params_list : Sequence | NDArray
             List of parameters.
+        fit_gmm : bool, optional
+            Whether to fit the data with a Gaussian mixture model. Defaults to False.
         xlabel : str, optional
             Label of the x-axis. Defaults to "Index".
         shots : int, optional
@@ -3859,7 +4708,7 @@ class Experiment:
         ...     "Q00": ex.hpi_pulse["Q00"].scaled(x),
         ...     "Q01": ex.hpi_pulse["Q01"].scaled(x),
         >>> params_list = np.linspace(0.5, 1.5, 100)
-        >>> probs = ex.measure_popultion_dynamics(sequence, params_list)
+        >>> result = ex.measure_popultion_dynamics(sequence, params_list)
         """
         if isinstance(params_list[0], int):
             x = params_list
@@ -3876,6 +4725,7 @@ class Experiment:
         for params in tqdm(params_list):
             prob_dict, err_dict = self.measure_population(
                 sequence=sequence(params),
+                fit_gmm=fit_gmm,
                 shots=shots,
                 interval=interval,
             )
@@ -3891,31 +4741,60 @@ class Experiment:
             target: np.array(buffer_errs[target]).T for target in buffer_errs
         }
 
-        fig = go.Figure()
         for target in result_pops:
+            fig = go.Figure()
             for state, probs in enumerate(result_pops[target]):
                 fig.add_scatter(
                     name=f"|{state}⟩",
                     mode=scatter_mode,
                     x=x,
                     y=probs,
-                    error_y=dict(
-                        type="data",
-                        array=result_errs[target][state],
-                        visible=True,
-                        thickness=1.5,
-                        width=3,
-                    )
-                    if show_error
-                    else None,
+                    error_y=(
+                        dict(
+                            type="data",
+                            array=result_errs[target][state],
+                            visible=True,
+                            thickness=1.5,
+                            width=3,
+                        )
+                        if show_error
+                        else None
+                    ),
                     marker=dict(size=5),
                 )
-        fig.update_layout(
-            title=f"Population dynamics : {target}",
-            xaxis_title=xlabel,
-            yaxis_title="Probability",
-            yaxis_range=[0, 1],
-        )
-        fig.show()
+            fig.update_layout(
+                title=f"Population dynamics : {target}",
+                xaxis_title=xlabel,
+                yaxis_title="Probability",
+                yaxis_range=[-0.1, 1.1],
+            )
+            fig.show()
 
         return result_pops, result_errs
+
+
+class ExperimentUtil:
+    @staticmethod
+    def split_frequency_range(
+        frequency_range: ArrayLike,
+        subrange_width: float = 0.3,
+    ) -> list[NDArray[np.float64]]:
+        """
+        Splits the frequency range into sub-ranges.
+
+        Parameters
+        ----------
+        frequency_range : ArrayLike
+            Frequency range to split in GHz.
+        ubrange_width : float, optional
+            Width of the sub-ranges. Defaults to 0.3 GHz.
+
+        Returns
+        -------
+        list[NDArray[np.float64]]
+            Sub-ranges.
+        """
+        frequency_range = np.array(frequency_range)
+        range_count = (frequency_range[-1] - frequency_range[0]) // subrange_width + 1
+        sub_ranges = np.array_split(frequency_range, range_count)
+        return sub_ranges

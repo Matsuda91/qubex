@@ -4,12 +4,12 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
 
-import matplotlib.pyplot as plt
 import numpy as np
 import numpy.typing as npt
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 from scipy.fft import fft, fftfreq
-from scipy.optimize import curve_fit, minimize
+from scipy.optimize import curve_fit, least_squares, minimize
 from sklearn.decomposition import PCA
 
 COLORS = [
@@ -73,6 +73,7 @@ class RabiParam:
 def normalize(
     values: npt.NDArray,
     param: RabiParam,
+    centers: dict[int, complex] | None = None,
 ) -> npt.NDArray:
     """
     Normalizes the measured I/Q value.
@@ -83,15 +84,27 @@ def normalize(
         Measured I/Q value.
     param : RabiParam
         Parameters of the Rabi oscillation.
+    centers : dict[int, complex], optional
+        Centers of the |g> and |e> states.
 
     Returns
     -------
     npt.NDArray
         Normalized I/Q value.
     """
-    values_rotated = values * np.exp(-1j * param.angle)
-    values_normalized = (np.imag(values_rotated) - param.offset) / param.amplitude
-    return values_normalized
+    # if centers is not None:
+    #     p = np.array(values, dtype=np.complex128)
+    #     g, e = centers[0], centers[1]
+    #     v_ge = e - g
+    #     v_gp = p - g
+    #     v_gp_proj = np.real(v_gp * np.conj(v_ge)) / np.abs(v_ge)
+    #     normalized = 1 - 2 * np.abs(v_gp_proj) / np.abs(v_ge)
+    # else:
+    #     rotated = values * np.exp(-1j * param.angle)
+    #     normalized = (np.imag(rotated) - param.offset) / param.amplitude
+    rotated = values * np.exp(-1j * param.angle)
+    normalized = (np.imag(rotated) - param.offset) / param.amplitude
+    return normalized
 
 
 def func_cos(
@@ -198,6 +211,26 @@ def func_lorentzian(
     return A / (1 + ((f - f0) / gamma) ** 2) + C
 
 
+def func_resonance(f, f_r, kappa_ex, kappa_in, A, phi):
+    """
+    Calculate a resonance function with given parameters.
+
+    Parameters
+    ----------
+    f : npt.NDArray[np.float64]
+        Frequency points for the function evaluation.
+    f_r : float
+        Resonance frequency.
+    kappa_ex : float
+        External loss rate.
+    kappa_in : float
+        Internal loss rate.
+    """
+    numerator = (f - f_r) * 1j + (-kappa_ex + kappa_in) / 2
+    denominator = (f - f_r) * 1j + (kappa_ex + kappa_in) / 2
+    return A * np.exp(1j * phi) * (numerator / denominator)
+
+
 def fit_rabi(
     *,
     target: str,
@@ -206,6 +239,8 @@ def fit_rabi(
     wave_count: float | None = None,
     plot: bool = True,
     is_damped: bool = False,
+    yaxis_title: str | None = None,
+    yaxis_range: tuple[float, float] | None = None,
 ) -> RabiParam:
     """
     Fit Rabi oscillation data to a cosine function and plot the results.
@@ -231,27 +266,22 @@ def fit_rabi(
         Data class containing the parameters of the Rabi oscillation.
     """
     print(f"Target: {target}")
-    data = np.array(data, dtype=np.complex128)
+    data = np.array(data, dtype=np.complex64)
 
     # Rotate the data to align the Q axis (|g>: +Q, |e>: -Q)
     if len(data) < 2:
         angle = 0.0
     else:
-        # angle of the |g> state
-        angle_0 = np.angle(data[0])
-        # rotate the |g> state to the +I axis
-        data_0 = data * np.exp(-1j * angle_0)
-        # convert to a 2D vector for PCA
-        data_0_vec = np.column_stack([data_0.real, data_0.imag])
-        # perform PCA
-        pca = PCA(n_components=2).fit(data_0_vec)
-        # get second component as the |g> + |e> vector
-        second_component = pca.components_[1]
-        # get the angle of the |g> + |e> vector (angle should be negative)
-        second_component *= -1 if second_component[1] > 0 else 1
-        angle_1 = np.arctan2(second_component[1], second_component[0])
-        # total angle to rotate the data
-        angle = angle_0 + angle_1
+        data_vec = np.column_stack([data.real, data.imag])
+        pca = PCA(n_components=2).fit(data_vec)
+        start_point = data_vec[0]
+        mean_point = pca.mean_
+        data_direction = mean_point - start_point
+        principal_component = pca.components_[0]
+        dot_product = np.dot(data_direction, principal_component)
+        ge_vector = principal_component if dot_product > 0 else -principal_component
+        angle_ge = np.arctan2(ge_vector[1], ge_vector[0])
+        angle = angle_ge + np.pi / 2
 
     rotated = data * np.exp(-1j * angle)
     noise = float(np.std(rotated.real))
@@ -277,9 +307,9 @@ def fit_rabi(
                 (np.inf, np.inf, np.pi, np.inf, np.inf),
             )
             popt, _ = curve_fit(func_damped_cos, x, y, p0=p0, bounds=bounds)
-            print(
-                f"Fitted function: {popt[0]:.3g} * exp(-t/{popt[4]:.3g}) * cos({popt[1]:.3g} * t + {popt[2]:.3g}) + {popt[3]:.3g} ± {noise:.3g}"
-            )
+            # print(
+            #     f"Fitted function: {popt[0]:.3g} * exp(-t/{popt[4]:.3g}) * cos({popt[1]:.3g} * t + {popt[2]:.3g}) + {popt[3]:.3g} ± {noise:.3g}"
+            # )
         else:
             p0 = (amplitude_est, omega_est, phase_est, offset_est)
             bounds = (
@@ -287,9 +317,9 @@ def fit_rabi(
                 (np.inf, np.inf, np.pi, np.inf),
             )
             popt, _ = curve_fit(func_cos, x, y, p0=p0, bounds=bounds)
-            print(
-                f"Fitted function: {popt[0]:.3g} * cos({popt[1]:.3g} * t + {popt[2]:.3g}) + {popt[3]:.3g} ± {noise:.3g}"
-            )
+            # print(
+            #     f"Fitted function: {popt[0]:.3g} * cos({popt[1]:.3g} * t + {popt[2]:.3g}) + {popt[3]:.3g} ± {noise:.3g}"
+            # )
     except RuntimeError:
         print(f"Failed to fit the data for {target}.")
         return RabiParam(target, 0.0, 0.0, 0.0, 0.0, noise, angle)
@@ -300,9 +330,9 @@ def fit_rabi(
     offset = popt[3]
     frequency = omega / (2 * np.pi)
 
-    print(f"Phase shift: {angle:.3g} rad, {angle * 180 / np.pi:.3g} deg")
-    print(f"Rabi frequency: {frequency * 1e3:.3g} MHz")
-    print(f"Rabi period: {1 / frequency:.3g} ns")
+    # print(f"Phase shift: {angle:.3g} rad, {angle * 180 / np.pi:.3g} deg")
+    print(f"Rabi frequency: {frequency * 1e3:.6g} MHz")
+    # print(f"Rabi period: {1 / frequency:.3g} ns")
 
     if plot:
         x_fine = np.linspace(np.min(x), np.max(x), 1000)
@@ -331,7 +361,8 @@ def fit_rabi(
         fig.update_layout(
             title=(f"Rabi oscillation of {target} : {frequency * 1e3:.3g} MHz"),
             xaxis_title="Drive duration (ns)",
-            yaxis_title="Amplitude (arb. units)",
+            yaxis_title=yaxis_title or "Amplitude (arb. units)",
+            yaxis_range=yaxis_range,
         )
         fig.show(config=_plotly_config(f"rabi_{target}"))
 
@@ -376,7 +407,11 @@ def fit_detuned_rabi(
     def func(f_control, f_resonance, f_rabi):
         return np.sqrt(f_rabi**2 + (f_control - f_resonance) ** 2)
 
-    popt, _ = curve_fit(func, control_frequencies, rabi_frequencies)
+    try:
+        popt, _ = curve_fit(func, control_frequencies, rabi_frequencies)
+    except RuntimeError:
+        print(f"Failed to fit the data for {target}.")
+        return 0.0, 0.0
 
     f_resonance = popt[0]
     f_rabi = popt[1]
@@ -432,6 +467,7 @@ def fit_ramsey(
     y: npt.NDArray[np.float64],
     p0=None,
     bounds=None,
+    plot: bool = True,
     title: str = "Ramsey fringe",
     xaxis_title: str = "Time (μs)",
     yaxis_title: str = "Amplitude (arb. units)",
@@ -453,6 +489,8 @@ def fit_ramsey(
         Initial guess for the fitting parameters.
     bounds : optional
         Bounds for the fitting parameters.
+    plot : bool, optional
+        Whether to plot the data and the fit.
     title : str, optional
         Title of the plot.
     xaxis_title : str, optional
@@ -485,7 +523,11 @@ def fit_ramsey(
             (np.inf, omega_est * 1.1, np.pi, np.inf, np.inf),
         )
 
-    popt, _ = curve_fit(func_damped_cos, x, y, p0=p0, bounds=bounds)
+    try:
+        popt, _ = curve_fit(func_damped_cos, x, y, p0=p0, bounds=bounds)
+    except RuntimeError:
+        print(f"Failed to fit the data for {target}.")
+        return 0.0, 0.0
 
     A = popt[0]
     omega = popt[1]
@@ -503,39 +545,40 @@ def fit_ramsey(
     x_fine = np.linspace(np.min(x), np.max(x), 1000)
     y_fine = func_damped_cos(x_fine, *popt)
 
-    fig = go.Figure()
-    fig.add_trace(
-        go.Scatter(
-            x=x_fine * 1e-3,
-            y=y_fine,
-            mode="lines",
-            name="Fit",
+    if plot:
+        fig = go.Figure()
+        fig.add_trace(
+            go.Scatter(
+                x=x_fine * 1e-3,
+                y=y_fine,
+                mode="lines",
+                name="Fit",
+            )
         )
-    )
-    fig.add_trace(
-        go.Scatter(
-            x=x * 1e-3,
-            y=y,
-            mode="markers",
-            name="Data",
+        fig.add_trace(
+            go.Scatter(
+                x=x * 1e-3,
+                y=y,
+                mode="markers",
+                name="Data",
+            )
         )
-    )
-    fig.add_annotation(
-        xref="paper",
-        yref="paper",
-        x=0.95,
-        y=0.95,
-        text=f"τ = {tau * 1e-3:.3g} μs, f = {f * 1e3:.3g} MHz",
-        showarrow=False,
-    )
-    fig.update_layout(
-        title=f"{title} : {target}",
-        xaxis_title=xaxis_title,
-        yaxis_title=yaxis_title,
-        xaxis_type=xaxis_type,
-        yaxis_type=yaxis_type,
-    )
-    fig.show(config=_plotly_config(f"ramsey_{target}"))
+        fig.add_annotation(
+            xref="paper",
+            yref="paper",
+            x=0.95,
+            y=0.95,
+            text=f"τ = {tau * 1e-3:.3g} μs, f = {f * 1e3:.3g} MHz",
+            showarrow=False,
+        )
+        fig.update_layout(
+            title=f"{title} : {target}",
+            xaxis_title=xaxis_title,
+            yaxis_title=yaxis_title,
+            xaxis_type=xaxis_type,
+            yaxis_type=yaxis_type,
+        )
+        fig.show(config=_plotly_config(f"ramsey_{target}"))
 
     return tau, f
 
@@ -547,6 +590,7 @@ def fit_exp_decay(
     y: npt.NDArray[np.float64],
     p0=None,
     bounds=None,
+    plot: bool = True,
     title: str = "Decay time",
     xaxis_title: str = "Time (μs)",
     yaxis_title: str = "Amplitude (arb. units)",
@@ -568,6 +612,8 @@ def fit_exp_decay(
         Initial guess for the fitting parameters.
     bounds : optional
         Bounds for the fitting parameters.
+    plot : bool, optional
+        Whether to plot the data and the fit.
     title : str, optional
         Title of the plot.
     xaxis_title : str, optional
@@ -597,7 +643,12 @@ def fit_exp_decay(
             (np.inf, np.inf, np.inf),
         )
 
-    popt, _ = curve_fit(func_exp_decay, x, y, p0=p0, bounds=bounds)
+    try:
+        popt, _ = curve_fit(func_exp_decay, x, y, p0=p0, bounds=bounds)
+    except RuntimeError:
+        print(f"Failed to fit the data for {target}.")
+        return 0.0
+
     A = popt[0]
     tau = popt[1]
     C = popt[2]
@@ -607,39 +658,40 @@ def fit_exp_decay(
     x_fine = np.linspace(np.min(x), np.max(x), 1000)
     y_fine = func_exp_decay(x_fine, *popt)
 
-    fig = go.Figure()
-    fig.add_trace(
-        go.Scatter(
-            x=x_fine * 1e-3,
-            y=y_fine,
-            mode="lines",
-            name="Fit",
+    if plot:
+        fig = go.Figure()
+        fig.add_trace(
+            go.Scatter(
+                x=x_fine * 1e-3,
+                y=y_fine,
+                mode="lines",
+                name="Fit",
+            )
         )
-    )
-    fig.add_trace(
-        go.Scatter(
-            x=x * 1e-3,
-            y=y,
-            mode="markers",
-            name="Data",
+        fig.add_trace(
+            go.Scatter(
+                x=x * 1e-3,
+                y=y,
+                mode="markers",
+                name="Data",
+            )
         )
-    )
-    fig.add_annotation(
-        xref="paper",
-        yref="paper",
-        x=0.95,
-        y=0.95,
-        text=f"τ = {tau * 1e-3:.3g} μs",
-        showarrow=False,
-    )
-    fig.update_layout(
-        title=f"{title} : {target}",
-        xaxis_title=xaxis_title,
-        yaxis_title=yaxis_title,
-        xaxis_type=xaxis_type,
-        yaxis_type=yaxis_type,
-    )
-    fig.show(config=_plotly_config(f"exp_decay_{target}"))
+        fig.add_annotation(
+            xref="paper",
+            yref="paper",
+            x=0.95,
+            y=0.95,
+            text=f"τ = {tau * 1e-3:.3g} μs",
+            showarrow=False,
+        )
+        fig.update_layout(
+            title=f"{title} : {target}",
+            xaxis_title=xaxis_title,
+            yaxis_title=yaxis_title,
+            xaxis_type=xaxis_type,
+            yaxis_type=yaxis_type,
+        )
+        fig.show(config=_plotly_config(f"exp_decay_{target}"))
 
     return tau
 
@@ -703,7 +755,12 @@ def fit_rb(
     def func_rb(n: npt.NDArray[np.float64], p: float):
         return (1 - p) ** n
 
-    popt, _ = curve_fit(func_rb, x, y, p0=p0, bounds=bounds)
+    try:
+        popt, _ = curve_fit(func_rb, x, y, p0=p0, bounds=bounds)
+    except RuntimeError:
+        print(f"Failed to fit the data for {target}.")
+        return 0.0, 0.0, 0.0
+
     depolarizing_rate = popt[0]
     r = 1 - depolarizing_rate
     avg_gate_error = (2 - 1) / 2 * (1 - r)
@@ -861,6 +918,7 @@ def fit_ampl_calib_data(
     amplitude_range: npt.NDArray[np.float64],
     data: npt.NDArray[np.float64],
     p0=None,
+    plot: bool = True,
     title: str = "Amplitude calibration",
     xaxis_title: str = "Amplitude (arb. units)",
     yaxis_title: str = "Measured value (arb. units)",
@@ -880,6 +938,8 @@ def fit_ampl_calib_data(
         Measured values for the calibration data.
     p0 : optional
         Initial guess for the fitting parameters.
+    plot : bool, optional
+        Whether to plot the data and the fit.
 
     Returns
     -------
@@ -900,12 +960,13 @@ def fit_ampl_calib_data(
 
     try:
         popt, _ = curve_fit(cos_func, amplitude_range, data, p0=p0)
-        print(
-            f"Fitted function: {popt[0]:.3g} * cos({popt[1]:.3g} * t + {popt[2]:.3g}) + {popt[3]:.3g}"
-        )
     except RuntimeError:
         print(f"Failed to fit the data for {target}.")
         return 0.0
+
+    print(
+        f"Fitted function: {popt[0]:.3g} * cos({popt[1]:.3g} * t + {popt[2]:.3g}) + {popt[3]:.3g}"
+    )
 
     result = minimize(
         cos_func,
@@ -919,38 +980,39 @@ def fit_ampl_calib_data(
     x_fine = np.linspace(np.min(amplitude_range), np.max(amplitude_range), 1000)
     y_fine = cos_func(x_fine, *popt)
 
-    fig = go.Figure()
-    fig.add_trace(
-        go.Scatter(
-            x=x_fine,
-            y=y_fine,
-            mode="lines",
-            name="Fit",
+    if plot:
+        fig = go.Figure()
+        fig.add_trace(
+            go.Scatter(
+                x=x_fine,
+                y=y_fine,
+                mode="lines",
+                name="Fit",
+            )
         )
-    )
-    fig.add_trace(
-        go.Scatter(
-            x=amplitude_range,
-            y=data,
-            mode="markers",
-            name="Data",
+        fig.add_trace(
+            go.Scatter(
+                x=amplitude_range,
+                y=data,
+                mode="markers",
+                name="Data",
+            )
         )
-    )
-    fig.add_annotation(
-        x=min_x,
-        y=min_y,
-        text=f"min: {min_x:.6g}",
-        showarrow=True,
-        arrowhead=1,
-    )
-    fig.update_layout(
-        title=f"{title} : {target}",
-        xaxis_title=xaxis_title,
-        yaxis_title=yaxis_title,
-        xaxis_type=xaxis_type,
-        yaxis_type=yaxis_type,
-    )
-    fig.show(config=_plotly_config(f"ampl_calib_{target}"))
+        fig.add_annotation(
+            x=min_x,
+            y=min_y,
+            text=f"min: {min_x:.6g}",
+            showarrow=True,
+            arrowhead=1,
+        )
+        fig.update_layout(
+            title=f"{title} : {target}",
+            xaxis_title=xaxis_title,
+            yaxis_title=yaxis_title,
+            xaxis_type=xaxis_type,
+            yaxis_type=yaxis_type,
+        )
+        fig.show(config=_plotly_config(f"ampl_calib_{target}"))
 
     print(f"Calibrated amplitude: {min_x:.6g}")
 
@@ -962,6 +1024,7 @@ def fit_lorentzian(
     freq_range: npt.NDArray[np.float64],
     data: npt.NDArray[np.float64],
     p0=None,
+    plot: bool = True,
     title: str = "Lorentzian fit",
     xaxis_title: str = "Frequency (GHz)",
     yaxis_title: str = "Amplitude (arb. units)",
@@ -979,6 +1042,10 @@ def fit_lorentzian(
         Frequency range for the Lorentzian data.
     data : npt.NDArray[np.float64]
         Amplitude data for the Lorentzian data.
+    p0 : optional
+        Initial guess for the fitting parameters.
+    plot : bool, optional
+        Whether to plot the data and the fit.
 
     Returns
     -------
@@ -993,7 +1060,11 @@ def fit_lorentzian(
             np.min(data),
         )
 
-    popt, _ = curve_fit(func_lorentzian, freq_range, data, p0=p0)
+    try:
+        popt, _ = curve_fit(func_lorentzian, freq_range, data, p0=p0)
+    except RuntimeError:
+        print(f"Failed to fit the data for {target}.")
+        return 0.0
 
     A = popt[0]
     f0 = popt[1]
@@ -1007,125 +1078,261 @@ def fit_lorentzian(
     x_fine = np.linspace(np.min(freq_range), np.max(freq_range), 1000)
     y_fine = func_lorentzian(x_fine, *popt)
 
-    fig = go.Figure()
-    fig.add_trace(
-        go.Scatter(
-            x=x_fine,
-            y=y_fine,
-            mode="lines",
-            name="Fit",
+    if plot:
+        fig = go.Figure()
+        fig.add_trace(
+            go.Scatter(
+                x=x_fine,
+                y=y_fine,
+                mode="lines",
+                name="Fit",
+            )
         )
-    )
-    fig.add_trace(
-        go.Scatter(
-            x=freq_range,
-            y=data,
-            mode="markers",
-            name="Data",
+        fig.add_trace(
+            go.Scatter(
+                x=freq_range,
+                y=data,
+                mode="markers",
+                name="Data",
+            )
         )
-    )
-    fig.add_annotation(
-        x=f0,
-        y=A,
-        text=f"max: {f0:.6g}",
-        showarrow=True,
-        arrowhead=1,
-    )
-    fig.update_layout(
-        title=f"{title} : {target}",
-        xaxis_title=xaxis_title,
-        yaxis_title=yaxis_title,
-        xaxis_type=xaxis_type,
-        yaxis_type=yaxis_type,
-    )
-    fig.show(config=_plotly_config(f"lorentzian_{target}"))
+        fig.add_annotation(
+            x=f0,
+            y=A,
+            text=f"max: {f0:.6g}",
+            showarrow=True,
+            arrowhead=1,
+        )
+        fig.update_layout(
+            title=f"{title} : {target}",
+            xaxis_title=xaxis_title,
+            yaxis_title=yaxis_title,
+            xaxis_type=xaxis_type,
+            yaxis_type=yaxis_type,
+        )
+        fig.show(config=_plotly_config(f"lorentzian_{target}"))
 
     return f0
 
 
-def fit_chevron(
-    center_frequency: float,
+def fit_reflection_coefficient(
+    target: str,
     freq_range: npt.NDArray[np.float64],
-    time_range: npt.NDArray[np.float64],
-    signals: list[npt.NDArray[np.float64]],
-):
+    data: npt.NDArray[np.complex128],
+    p0=None,
+    bounds=None,
+    plot: bool = True,
+    title: str = "Reflection coefficient",
+) -> tuple[float, float, float]:
     """
-    Plot Chevron patterns, perform Fourier analysis, and fit the data.
+    Fit reflection coefficient data and obtain the resonance frequency and loss rates.
 
     Parameters
     ----------
-    center_frequency : float
-        Central frequency around which the Chevron patterns are analyzed.
+    target : str
+        Identifier of the target.
     freq_range : npt.NDArray[np.float64]
-        Frequency range for the Chevron analysis.
-    time_range : npt.NDArray[np.float64]
-        Time range for the Chevron analysis.
-    signals : list[npt.NDArray[np.float64]]
-        Signal data for different frequencies in the Chevron analysis.
+        Frequency range for the reflection coefficient data.
+    data : npt.NDArray[np.complex128]
+        Complex reflection coefficient data.
+    p0 : optional
+        Initial guess for the fitting parameters.
+    bounds : optional
+        Bounds for the fitting parameters.
+    plot : bool, optional
+        Whether to plot the data and the fit.
 
     Returns
     -------
-    None
-        The function plots the Chevron patterns and their Fourier analysis.
+    tuple[float, float, float]
+        Resonance frequency, external loss rate, and internal loss rate.
     """
-    time, freq = np.meshgrid(time_range, center_frequency + freq_range * 1e6)
-    plt.pcolor(time, freq * 1e-6, signals)
-    plt.xlabel("Pulse length (ns)")
-    plt.ylabel("Drive frequency (MHz)")
-    plt.show()
 
-    length = 2**10
-    dt = (time_range[1] - time_range[0]) * 1e-9
-    freq_rabi_range = np.linspace(0, 0.5 / dt, length // 2)
+    if p0 is None:
+        p0 = (
+            (np.max(freq_range) + np.min(freq_range)) / 2,
+            0.005,
+            0.0,
+            np.mean(np.abs(data)),
+            0.0,
+        )
 
-    fourier_values = []
+    if bounds is None:
+        bounds = (
+            (np.min(freq_range), 0, 0, 0, -np.pi),
+            (np.max(freq_range), 1.0, 1.0, 1.0, np.pi),
+        )
 
-    for s in signals:
-        s = s - np.average(s)
-        signal_zero_filled = np.append(s, np.zeros(length - len(s)))
-        fourier = np.abs(np.fft.fft(signal_zero_filled))[: length // 2]
-        fourier_values.append(fourier)
+    def residuals(params, f, y):
+        f_r, kappa_ex, kappa_in, A, phi = params
+        y_model = func_resonance(f, f_r, kappa_ex, kappa_in, A, phi)
+        return np.hstack([np.real(y_model - y), np.imag(y_model - y)])
 
-    freq_ctrl_range = center_frequency + freq_range * 1e6
-    grid_rabi, grid_ctrl = np.meshgrid(freq_rabi_range, freq_ctrl_range)
-    plt.pcolor(grid_rabi * 1e-6, grid_ctrl * 1e-6, fourier_values)
-    plt.xlabel("Rabi frequency (MHz)")
-    plt.ylabel("Drive frequency (MHz)")
-    plt.show()
-
-    buf = []
-    for f in fourier_values:
-        max_index = np.argmax(f)
-        buf.append(freq_rabi_range[max_index])
-    freq_rabi = np.array(buf)
-
-    def func(f_ctrl, f_rabi, f_reso, coeff):
-        return coeff * np.sqrt(f_rabi**2 + (f_ctrl - f_reso) ** 2)
-
-    p0 = [10.0e6, 8000.0e6, 1.0]
-
-    freq_ctrl = center_frequency + freq_range * 1e6
-
-    popt, _ = curve_fit(func, freq_ctrl, freq_rabi, p0=p0, maxfev=100000)
-
-    f_rabi = popt[0]
-    f_reso = popt[1]
-    coeff = popt[2]  # ge: 1, ef: sqrt(2)
-
-    print(
-        f"f_reso = {f_reso * 1e-6:.2f} MHz, f_rabi = {f_rabi * 1e-6:.2f} MHz, coeff = {coeff:.2f}"
+    result = least_squares(
+        residuals,
+        p0,
+        bounds=bounds,
+        args=(freq_range, data),
     )
 
-    freq_ctrl_fine = np.linspace(np.min(freq_ctrl), np.max(freq_ctrl), 1000)
-    freq_rabi_fit = func(freq_ctrl_fine, *popt)
+    fitted_params = result.x
 
-    plt.scatter(freq_ctrl * 1e-6, freq_rabi * 1e-6, label="Data")
-    plt.plot(freq_ctrl_fine * 1e-6, freq_rabi_fit * 1e-6, label="Fit")
+    f_r = fitted_params[0]
+    kappa_ex = fitted_params[1]
+    kappa_in = fitted_params[2]
+    # A = fitted_params[3]
+    # phi = fitted_params[4]
 
-    plt.xlabel("Drive frequency (MHz)")
-    plt.ylabel("Rabi frequency (MHz)")
-    plt.legend()
-    plt.show()
+    # print(
+    #     f"Fitted function:\n  {A:.3g} * exp(1j * {phi:.3g}) * ((f - {f_r:.3g}) * 1j + (-{kappa_ex:.3g} + {kappa_in:.3g}) / 2) / ((f - {f_r:.3g}) * 1j + ({kappa_ex:.3g} + {kappa_in:.3g}) / 2)"
+    # )
+
+    print(f"Resonance frequency:\n  {f_r:.6f} GHz")
+    print(f"External loss rate:\n  {kappa_ex * 1e3:.6f} MHz")
+    print(f"Internal loss rate:\n  {kappa_in * 1e3:.6f} MHz")
+
+    x_fine = np.linspace(np.min(freq_range), np.max(freq_range), 1000)
+    y_fine = func_resonance(x_fine, *fitted_params)
+
+    if plot:
+        fig = make_subplots(
+            rows=2,
+            cols=2,
+            column_widths=[0.5, 0.5],
+            row_heights=[1.0, 1.0],
+            specs=[
+                [{"rowspan": 2}, {}],
+                [None, {}],
+            ],
+            shared_xaxes=False,
+            vertical_spacing=0.05,
+            horizontal_spacing=0.125,
+        )
+
+        fig.add_trace(
+            go.Scatter(
+                x=np.real(data),
+                y=np.imag(data),
+                mode="markers",
+                name="I/Q (Data)",
+                marker=dict(color=COLORS[0]),
+            ),
+            row=1,
+            col=1,
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=np.real(y_fine),
+                y=np.imag(y_fine),
+                mode="lines",
+                name="I/Q (Fit)",
+                marker=dict(color=COLORS[1]),
+            ),
+            row=1,
+            col=1,
+        )
+
+        fig.add_trace(
+            go.Scatter(
+                x=freq_range,
+                y=np.real(data),
+                mode="markers",
+                name="Re (Data)",
+                marker=dict(color=COLORS[0]),
+            ),
+            row=1,
+            col=2,
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=x_fine,
+                y=np.real(y_fine),
+                mode="lines",
+                name="Re (Fit)",
+                marker=dict(color=COLORS[1]),
+            ),
+            row=1,
+            col=2,
+        )
+
+        fig.add_trace(
+            go.Scatter(
+                x=freq_range,
+                y=np.imag(data),
+                mode="markers",
+                name="Im (Data)",
+                marker=dict(color=COLORS[0]),
+            ),
+            row=2,
+            col=2,
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=x_fine,
+                y=np.imag(y_fine),
+                mode="lines",
+                name="Im (Fit)",
+                marker=dict(color=COLORS[1]),
+            ),
+            row=2,
+            col=2,
+        )
+
+        fig.update_layout(
+            title=f"{title} : {target}",
+            height=450,
+            width=800,
+            showlegend=False,
+        )
+
+        fig.update_xaxes(
+            title_text="Re",
+            row=1,
+            col=1,
+            tickformat=".2g",
+            showticklabels=True,
+            zeroline=True,
+            zerolinecolor="black",
+            showgrid=True,
+        )
+        fig.update_yaxes(
+            title_text="Im",
+            row=1,
+            col=1,
+            scaleanchor="x",
+            scaleratio=1,
+            tickformat=".2g",
+            showticklabels=True,
+            zeroline=True,
+            zerolinecolor="black",
+            showgrid=True,
+        )
+        fig.update_xaxes(
+            row=1,
+            col=2,
+            showticklabels=False,
+            matches="x2",
+        )
+        fig.update_yaxes(
+            title_text="Re",
+            row=1,
+            col=2,
+        )
+        fig.update_xaxes(
+            title_text="Frequency (GHz)",
+            row=2,
+            col=2,
+            matches="x2",
+        )
+        fig.update_yaxes(
+            title_text="Im",
+            row=2,
+            col=2,
+        )
+
+        fig.show()
+
+    return f_r, kappa_ex, kappa_in
 
 
 def rotate(

@@ -6,6 +6,7 @@ import numpy as np
 import plotly.graph_objs as go
 import qctrlvisualizer as qcv
 from IPython.display import display
+from ipywidgets import Output
 from numpy.typing import ArrayLike, NDArray
 
 from ..style import get_colors, get_config
@@ -207,6 +208,9 @@ def plot_state_distribution(
 ) -> None:
     fig = go.Figure()
     colors = get_colors(alpha=0.8)
+    max_val = np.max([np.max(np.abs(data[qubit])) for qubit in data])
+    axis_range = [-max_val * 1.1, max_val * 1.1]
+    dtick = max_val / 2
     for idx, (qubit, iq) in enumerate(data.items()):
         color = colors[idx % len(colors)]
         scatter = go.Scatter(
@@ -227,7 +231,26 @@ def plot_state_distribution(
         width=500,
         height=400,
         margin=dict(l=120, r=120),
-        yaxis=dict(scaleanchor="x", scaleratio=1),
+        xaxis=dict(
+            range=axis_range,
+            dtick=dtick,
+            tickformat=".2g",
+            showticklabels=True,
+            zeroline=True,
+            zerolinecolor="black",
+            showgrid=True,
+        ),
+        yaxis=dict(
+            range=axis_range,
+            scaleanchor="x",
+            scaleratio=1,
+            dtick=dtick,
+            tickformat=".2g",
+            showticklabels=True,
+            zeroline=True,
+            zerolinecolor="black",
+            showgrid=True,
+        ),
     )
     fig.show(config=get_config())
 
@@ -240,6 +263,9 @@ def scatter_iq_data(
 ) -> None:
     fig = go.Figure()
     colors = get_colors(alpha=0.8)
+    max_val = np.max([np.max(np.abs(data[qubit])) for qubit in data])
+    axis_range = [-max_val * 1.1, max_val * 1.1]
+    dtick = max_val / 2
     for idx, (qubit, iq) in enumerate(data.items()):
         color = colors[idx % len(colors)]
         scatter = go.Scatter(
@@ -260,14 +286,39 @@ def scatter_iq_data(
         width=500,
         height=400,
         margin=dict(l=120, r=120),
-        yaxis=dict(scaleanchor="x", scaleratio=1),
+        xaxis=dict(
+            range=axis_range,
+            dtick=dtick,
+            tickformat=".2g",
+            showticklabels=True,
+            zeroline=True,
+            zerolinecolor="black",
+            showgrid=True,
+        ),
+        yaxis=dict(
+            range=axis_range,
+            scaleanchor="x",
+            scaleratio=1,
+            dtick=dtick,
+            tickformat=".2g",
+            showticklabels=True,
+            zeroline=True,
+            zerolinecolor="black",
+            showgrid=True,
+        ),
     )
     fig.show(config=get_config())
 
 
 class IQPlotter:
-    def __init__(self):
-        self._num_scatters = None
+    def __init__(
+        self,
+        state_centers: TargetMap[dict[int, complex]] | None = None,
+    ):
+        self._state_centers = state_centers or {}
+        self._colors = [f"rgba{color}" for color in get_colors(alpha=0.8)]
+        self._num_scatters = -1
+        self._output = Output()
         self._widget = go.FigureWidget()
         self._widget.update_layout(
             title="I/Q plane",
@@ -276,22 +327,103 @@ class IQPlotter:
             width=500,
             height=400,
             margin=dict(l=120, r=120),
-            yaxis=dict(scaleanchor="x", scaleratio=1),
+            xaxis=dict(
+                zeroline=True,
+                zerolinecolor="black",
+                tickformat=".2g",
+                showticklabels=True,
+                showgrid=True,
+            ),
+            yaxis=dict(
+                scaleanchor="x",
+                scaleratio=1,
+                tickformat=".2g",
+                showticklabels=True,
+                zeroline=True,
+                zerolinecolor="black",
+                showgrid=True,
+            ),
             showlegend=True,
         )
 
+        if state_centers is not None:
+            colors = get_colors(alpha=0.1)
+            for idx, (label, centers) in enumerate(state_centers.items()):
+                color = colors[idx % len(colors)]
+                center_values = list(centers.values())
+                x = np.real(center_values)
+                y = np.imag(center_values)
+                self._widget.add_trace(
+                    go.Scatter(
+                        x=x,
+                        y=y,
+                        mode="text+markers",
+                        text=[f"|{state}〉" for state in centers],
+                        name=f"{label}",
+                        hoverinfo="name",
+                        showlegend=True,
+                        marker=dict(
+                            symbol="circle",
+                            size=30,
+                            color=f"rgba{color}",
+                        ),
+                        textfont=dict(
+                            size=12,
+                            color="black",
+                        ),
+                        legendgroup="state",
+                    )
+                )
+
     def update(self, data: TargetMap[IQArray]):
-        if self._num_scatters is None:
-            display(self._widget)
-            for qubit in data:
-                self._widget.add_scatter(name=qubit, mode="markers")
+        if self._num_scatters == -1:
+            display(self._output)
+            with self._output:
+                display(self._widget)
+            for idx, qubit in enumerate(data):
+                if qubit in self._state_centers:
+                    idx = list(self._state_centers.keys()).index(qubit)
+                color = self._colors[idx % len(self._colors)]
+                self._widget.add_scatter(
+                    name=qubit,
+                    meta=qubit,
+                    mode="markers",
+                    marker=dict(size=4, color=color),
+                    legendrank=idx,
+                )
             self._num_scatters = len(data)
         if len(data) != self._num_scatters:
             raise ValueError("Number of scatters does not match")
-        for idx, qubit in enumerate(data):
-            scatter: go.Scatter = self._widget.data[idx]  # type: ignore
-            scatter.x = np.real(data[qubit])
-            scatter.y = np.imag(data[qubit])
+
+        max_val = np.max([np.max(np.abs(data[qubit])) for qubit in data])
+        axis_range = [-max_val * 1.1, max_val * 1.1]
+        dtick = max_val / 2
+
+        self._widget.update_layout(
+            xaxis=dict(
+                range=axis_range,
+                dtick=dtick,
+            ),
+            yaxis=dict(
+                range=axis_range,
+                dtick=dtick,
+            ),
+        )
+
+        for qubit in data:
+            for trace in self._widget.data:
+                scatter: go.Scatter = trace  # type: ignore
+                if scatter.meta == qubit:
+                    scatter.x = np.real(data[qubit])
+                    scatter.y = np.imag(data[qubit])
+
+    def clear(self):
+        self._output.clear_output()
+        self._output.close()
+
+    def show(self):
+        self.clear()
+        self._widget.show(config=get_config())
 
 
 class IQPlotterPolar:
