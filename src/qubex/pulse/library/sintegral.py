@@ -112,7 +112,7 @@ class Sintegral(Pulse):
             np.where(
                 (t <= duration // 2),
                 values,
-                values if is_odd else 2 - values,
+                values if is_odd else 2 * amplitude - values,
             ),
             0,
         ).astype(np.complex128)
