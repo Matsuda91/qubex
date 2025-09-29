@@ -48,6 +48,8 @@ class FlatTop(Pulse):
         tau: float,
         beta: float | None = None,
         type: RampType = "RaisedCosine",
+        drag_coef: dict[int, float] | None = None,
+        sintegral_power: int = 2,
         **kwargs,
     ):
         self.amplitude: Final = amplitude
@@ -63,6 +65,8 @@ class FlatTop(Pulse):
                 tau=tau,
                 beta=beta,
                 type=type,
+                drag_coef=drag_coef,
+                sintegral_power=sintegral_power,
             )
 
         super().__init__(values, **kwargs)
@@ -76,6 +80,8 @@ class FlatTop(Pulse):
         tau: float,
         beta: float | None = None,
         type: RampType = "RaisedCosine",
+        drag_coef: dict[int, float] | None = None,
+        sintegral_power: int = 2,
     ) -> NDArray:
         """
         Flat-top pulse function.
@@ -115,6 +121,8 @@ class FlatTop(Pulse):
             amplitude=amplitude,
             beta=beta,
             type=type,
+            drag_coef=drag_coef,
+            sintegral_power=sintegral_power,
         )
         v_flat = amplitude * np.ones_like(t)
         v_fall = Drag.func(
@@ -123,6 +131,8 @@ class FlatTop(Pulse):
             amplitude=amplitude,
             beta=beta,
             type=type,
+            drag_coef=drag_coef,
+            sintegral_power=sintegral_power,
         )
 
         return np.where(

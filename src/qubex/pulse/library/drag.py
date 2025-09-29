@@ -43,11 +43,15 @@ class Drag(Pulse):
         amplitude: float,
         beta: float,
         type: Literal["Gaussian", "RaisedCosine", "Sintegral", "Bump"] = "Gaussian",
+        drag_coef: dict[int, float] | None = None,
+        sintegral_power: int | None = None,
         **kwargs,
     ):
         self.amplitude: Final = amplitude
         self.beta: Final = beta
         self.type: Final = type
+        self.drag_coef: Final = drag_coef
+        self.sintegral_power: Final = sintegral_power
 
         if duration == 0:
             values = np.array([], dtype=np.complex128)
@@ -58,6 +62,8 @@ class Drag(Pulse):
                 amplitude=amplitude,
                 beta=beta,
                 type=type,
+                drag_coef=drag_coef,
+                sintegral_power=sintegral_power,
             )
 
         super().__init__(values, **kwargs)
@@ -70,6 +76,8 @@ class Drag(Pulse):
         amplitude: float,
         beta: float,
         type: Literal["Gaussian", "RaisedCosine", "Sintegral", "Bump"] = "Gaussian",
+        drag_coef: dict[int, float] | None = None,
+        sintegral_power: int | None = None,
     ) -> NDArray:
         """
         DRAG pulse function.
@@ -104,12 +112,14 @@ class Drag(Pulse):
                 beta=beta,
             )
         elif type == "Sintegral":
+            power = sintegral_power or 2
             return Sintegral.func(
                 t=t,
                 duration=duration,
                 amplitude=amplitude,
-                power=2,
+                power=power,
                 beta=beta,
+                drag_coef=drag_coef or {1: beta or 0.0},
             )
         elif type == "Bump":
             return Bump.func(

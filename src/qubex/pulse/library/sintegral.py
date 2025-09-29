@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Final
+from typing import Final, Optional
 
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
@@ -40,11 +40,16 @@ class Sintegral(Pulse):
         amplitude: float,
         power: int = 2,
         beta: float | None = None,
+        drag_coef: dict[int, float] | None = None,
         **kwargs,
     ):
         self.amplitude: Final = amplitude
         self.power: Final = power
-        self.beta: Final = beta
+
+        if drag_coef is None:
+            drag_coef = {1: beta or 0.0}
+
+        self.drag_coef: Final = drag_coef
 
         if duration == 0:
             values = np.array([], dtype=np.complex128)
@@ -55,6 +60,7 @@ class Sintegral(Pulse):
                 amplitude=amplitude,
                 power=power,
                 beta=beta,
+                drag_coef=drag_coef,
             )
 
         super().__init__(values, **kwargs)
@@ -66,7 +72,8 @@ class Sintegral(Pulse):
         duration: float,
         amplitude: float,
         power: int,
-        beta: float | None = None,
+        beta: float | None,
+        drag_coef: dict[int, float],
     ) -> NDArray:
         """
         Evaluate the sine integral function.
@@ -83,6 +90,9 @@ class Sintegral(Pulse):
             Power of the sine integral function.
         beta : float, optional
             DRAG correction coefficient. Default is None.
+        drag_coef : dict[int, float], optional
+            Dictionary of DRAG coefficients. Default is None.
+            Keys and values corresopond to the derivative order and coefficient, respectively.
         """
         if duration == 0:
             raise ValueError("Duration cannot be zero.")
@@ -97,16 +107,27 @@ class Sintegral(Pulse):
             sin_pow_integral(np.pi, n=power) - sin_pow_integral(0, n=power)
         )
         Omega *= scale
-        if beta is None:
-            values = Omega
-        else:
+
+        drag_term = {0: Omega}
+        for order, _ in drag_coef.items():
             dOmega = sin_pow_derivative(
                 2 * np.pi * t / duration,
                 n=power,
-                m=0,
+                m=order,
             )
-            dOmega *= scale * 2 * np.pi / duration
-            values = Omega + 1j * beta * dOmega
+
+            dOmega *= scale * (2 * np.pi / duration) ** (order)
+            drag_term[order] = dOmega
+
+        real_part = Omega
+        imag_part = np.zeros_like(Omega)
+        for order, coef in drag_coef.items():
+            if order % 2 == 0:
+                real_part += coef * drag_term[order]
+            else:
+                imag_part += coef * drag_term[order]
+
+        values = real_part + 1j * imag_part
 
         is_odd = power % 2 == 1
         return np.where(
@@ -163,7 +184,7 @@ def sin_pow_derivative(
     # initial: f(x) = sin^n x
     terms = [(1.0, n, 0)]  # (coefficient, sin_pow, cos_pow)
 
-    for _ in range(m):
+    for _ in range(m - 1):
         new_terms = []
         for coeff, s_pow, c_pow in terms:
             if s_pow > 0:

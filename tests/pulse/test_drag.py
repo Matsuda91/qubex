@@ -34,6 +34,8 @@ def test_init():
             0.1650374 - 0.20579523j,
         ]
     )
+    assert pulse.drag_coef is None
+    assert pulse.sintegral_power is None
 
 
 def test_zero_duration():
