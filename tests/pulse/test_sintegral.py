@@ -13,7 +13,7 @@ def test_inheritance():
 
 
 def test_empty_init():
-    """Sintegrak should raise a TypeError if no duration is provided."""
+    """Sintegral should raise a TypeError if no duration is provided."""
     with pytest.raises(TypeError):
         Sintegral()  # type: ignore
 
