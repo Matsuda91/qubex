@@ -92,7 +92,7 @@ class Sintegral(Pulse):
             DRAG correction coefficient. Default is None.
         drag_coef : dict[int, float], optional
             Dictionary of DRAG coefficients. Default is None.
-            Keys and values corresopond to the derivative order and coefficient, respectively.
+            Keys and values correspond to the derivative order and coefficient, respectively.
         """
         if duration == 0:
             raise ValueError("Duration cannot be zero.")
