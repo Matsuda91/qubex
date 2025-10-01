@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Final, Optional
+from typing import Final
 
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
