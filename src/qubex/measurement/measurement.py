@@ -837,6 +837,8 @@ class Measurement:
         cap_sequences: dict[str, pls.CapSampledSequence] = {}
         for target, waveform in user_waveforms.items():
             # add GenSampledSequence (control)
+            if self.experiment_system.get_target(target).sideband != "L":
+                waveform = np.conj(waveform)
             gen_sequences[target] = pls.GenSampledSequence(
                 target_name=target,
                 prev_blank=0,
@@ -856,6 +858,8 @@ class Measurement:
             )
         for target, waveform in pump_waveforms.items():
             # add GenSampledSequence (pump)
+            if self.experiment_system.get_target(target).sideband != "L":
+                waveform = np.conj(waveform)
             gen_sequences[target] = pls.GenSampledSequence(
                 target_name=target,
                 prev_blank=0,
@@ -876,6 +880,8 @@ class Measurement:
         for target, waveform in readout_waveforms.items():
             qubit = Target.qubit_label(target)
             # add GenSampledSequence (readout)
+            if self.experiment_system.get_target(target).sideband != "L":
+                waveform = np.conj(waveform)
             modulation_frequency = self.get_awg_frequency(target)
             gen_sequences[target] = pls.GenSampledSequence(
                 target_name=target,
@@ -942,6 +948,7 @@ class Measurement:
             resource_map=resource_map,  # type: ignore
             interval=backend_interval,
             sysdb=self.device_controller.qubecalib.sysdb,
+            driver=self.device_controller.quel1system,
         )
 
     def _create_sampled_sequences_from_schedule(
@@ -1112,6 +1119,8 @@ class Measurement:
         # create GenSampledSequence
         gen_sequences: dict[str, pls.GenSampledSequence] = {}
         for target, waveform in sampled_sequences.items():
+            if self.experiment_system.get_target(target).sideband != "L":
+                waveform = np.conj(waveform)
             gen_sequences[target] = pls.GenSampledSequence(
                 target_name=target,
                 prev_blank=0,
@@ -1270,6 +1279,7 @@ class Measurement:
             resource_map=resource_map,  # type: ignore
             interval=backend_interval,
             sysdb=self.device_controller.qubecalib.sysdb,
+            driver=self.device_controller.quel1system,
         )
 
     def _create_measure_result(

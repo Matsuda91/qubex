@@ -88,7 +88,8 @@ class Control:
             x=self.times,
             y=self.values,
             kind=self.interpolation,
-            fill_value="extrapolate",  # type: ignore
+            bounds_error=False,
+            fill_value=(self.values[0], self.values[-1]),  # type: ignore
         )
 
     def get_samples(
@@ -178,6 +179,14 @@ class SimulationResult:
     def control_frequencies(self) -> dict[str, float]:
         return {control.target: control.frequency for control in self.controls}
 
+    @property
+    def initial_state(self) -> qt.Qobj:
+        return self.states[0]
+
+    @property
+    def final_state(self) -> qt.Qobj:
+        return self.states[-1]
+
     def get_substates(
         self,
         label: str,
@@ -219,6 +228,50 @@ class SimulationResult:
             )
 
         return substates
+
+    def get_initial_substate(
+        self,
+        label: str,
+        frame: Literal["qubit", "drive"] | None = None,
+    ) -> qt.Qobj:
+        """
+        Extract the initial substate of a qubit from the states.
+
+        Parameters
+        ----------
+        label : str
+            The label of the qubit.
+        frame : Literal["qubit", "drive"] | None, optional
+            The frame of the substates, by default "qubit"
+
+        Returns
+        -------
+        qt.Qobj
+            The initial substate of the qubit.
+        """
+        return self.get_substates(label, frame=frame)[0]
+
+    def get_final_substate(
+        self,
+        label: str,
+        frame: Literal["qubit", "drive"] | None = None,
+    ) -> qt.Qobj:
+        """
+        Extract the final substate of a qubit from the states.
+
+        Parameters
+        ----------
+        label : str
+            The label of the qubit.
+        frame : Literal["qubit", "drive"] | None, optional
+            The frame of the substates, by default "qubit"
+
+        Returns
+        -------
+        qt.Qobj
+            The final substate of the qubit.
+        """
+        return self.get_substates(label, frame=frame)[-1]
 
     def get_times(
         self,
@@ -514,11 +567,11 @@ class QuantumSimulator:
                 gamma = Omega * np.exp(-1j * delta * t)  # continuous
                 H_ctrl = gamma * ad + np.conj(gamma) * a
                 H += H_ctrl
-            U = (-1j * H * dt).expm() * U_list[-1]
+            U = (-1j * H * dt).expm() @ U_list[-1]
             U_list.append(U)
 
         rho0 = qt.ket2dm(initial_state)
-        states = np.array([U * rho0 * U.dag() for U in U_list])
+        states = np.array([U @ rho0 @ U.dag() for U in U_list])
         unitaries = np.array(U_list)
 
         if n_samples is not None:
@@ -599,7 +652,7 @@ class QuantumSimulator:
         for coupling in self.system.couplings:
             ad_0 = self.system.get_raising_operator(coupling.pair[0])
             a_1 = self.system.get_lowering_operator(coupling.pair[1])
-            op = ad_0 * a_1
+            op = ad_0 @ a_1
             g = 2 * np.pi * coupling.strength
             Delta = self.system.get_coupling_detuning(coupling.label)
             coeffs = g * np.exp(-1j * Delta * times)  # continuous
