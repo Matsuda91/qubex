@@ -174,13 +174,13 @@ def print_chip_info(
         "x90_gate_fidelity",
         "x180_gate_fidelity",
         "zx90_gate_fidelity",
+        "detuning_from_low_to_high",
     ],
     directed: bool = False,
     save_image: bool = False,
 ) -> None:
     """Print the information of the chip."""
     chip = system_manager.experiment_system.chip
-
     props: dict[str, dict[str, float]] = {
         key: {
             qubit: value if value is not None else math.nan
@@ -223,6 +223,7 @@ def print_chip_info(
             "x90_gate_fidelity",
             "x180_gate_fidelity",
             "zx90_gate_fidelity",
+            "detuning_from_low_to_high",
         )
 
     if "chip_summary" in info_type:
@@ -603,6 +604,40 @@ def print_chip_info(
                 },
                 save_image=save_image,
                 image_name="zx90_gate_fidelity",
+            )
+    if "detuning_from_low_to_high" in info_type:
+        if values := props.get("qubit_frequency"):
+            qubit_nodes = graph.qubit_nodes
+            edge_values = {}
+            for key, qubit_node in qubit_nodes.items():
+                if key%4 ==0 or key%4==3:
+                    
+                    qubit_label = qubit_node.get("label")
+                    f = values.get(qubit_label)
+                    nearest_neighbors = graph.nearest_neighbors[key]
+                    for neighbor in nearest_neighbors:
+                        nn_qubit_label = qubit_nodes[neighbor].get("label")
+                        f_nn = values.get(nn_qubit_label)
+                        pair_key = f'{qubit_label}-{nn_qubit_label}'
+                        detuning = f_nn - f
+                        edge_values.update({pair_key: detuning})
+                        
+            graph.plot_graph_data(
+                directed=False,
+                title="Detuning from low to high (MHz)",
+                edge_values=edge_values,
+                edge_texts={
+                    key: f"{value * 1e3:.1f}" if not math.isnan(value) else None
+                    for key, value in edge_values.items()
+                },
+                edge_hovertexts={
+                    key: f"{key}: {value * 1e3:.1f} MHz"
+                    if not math.isnan(value)
+                    else "N/A"
+                    for key, value in edge_values.items()
+                },
+                save_image=save_image,
+                image_name="detuning_from_low_to_high",
             )
 
 
