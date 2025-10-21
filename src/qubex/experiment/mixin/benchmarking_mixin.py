@@ -386,6 +386,7 @@ class BenchmarkingMixin(
         interleaved_clifford: Clifford | None = None,
         interleaved_waveform: TargetMap[PulseSchedule] | None = None,
         in_parallel: bool = False,
+        monitoring_spectators:bool = False,
         mitigate_readout: bool = True,
         shots: int | None = None,
         interval: float | None = None,
@@ -450,7 +451,78 @@ class BenchmarkingMixin(
             target_object = self.experiment_system.get_target(target)
             if not target_object.is_cr:
                 raise ValueError(f"`{target}` is not a 2Q target.")
+        
+        if monitoring_spectators is not None:
+            def get_spectator_groups(self:BenchmarkingMixin,targets:list[str], in_parallel=True, spectator="control"):
 
+                target_subspaces = [label for target in targets for label in Target.cr_qubit_pair(target)]
+                spectator_groups = []
+                for target in targets:
+                    control_qubit, target_qubit = Target.cr_qubit_pair(target)
+                    if spectator == "control":
+                        spectators = [
+                            qubit.label for qubit in self.get_spectators(control_qubit)
+                        ]
+                    elif spectator == "target":
+                        spectators = [
+                            qubit.label for qubit in self.get_spectators(target_qubit)
+                        ]
+                    elif spectator == "both":
+                        spectators = [
+                            qubit.label for qubit in self.get_spectators(control_qubit)
+                        ] + [qubit.label for qubit in self.get_spectators(target_qubit)]
+                    elif spectator == "all":
+                        spectators = [
+                            label
+                            for label in self.qubit_labels
+                            if label not in (control_qubit, target_qubit)
+                        ]
+                    if in_parallel:
+                        spectator_groups = spectator_groups + [
+                            _spectator
+                            for _spectator in spectators
+                            if (
+                                _spectator in self.qubit_labels
+                                and _spectator not in target_subspaces
+                                and _spectator not in spectator_groups
+                            )
+                        ]
+                    else:
+                        spectator_groups.append(
+                                [
+                                    _spectator
+                                    for _spectator in spectators
+                                    if (
+                                        _spectator in self.qubit_labels
+                                        and _spectator not in target_subspaces
+                                    )
+                                ],
+                        )
+                return spectator_groups
+            
+            spectator_groups = get_spectator_groups(
+                self,
+                targets=targets,
+                in_parallel=in_parallel,
+                spectator="control"
+            )
+
+        def rb_sequence_monitoring_spectators(
+                targets:list[str],
+                spectators:list[str],
+                n_cliffords: int,
+                seed: int,
+        ):
+            rb_seq = rb_sequence(
+                targets=targets,
+                n_clifford=n_clifford,
+                seed=seed,
+            )
+            with PulseSchedule(spectators) as ps:
+                ps.call(rb_seq)
+            return ps
+            
+        
         def rb_sequence(
             targets: list[str],
             n_clifford: int,
@@ -482,7 +554,7 @@ class BenchmarkingMixin(
             return ps
 
         return_data = {}
-        for target_group in target_groups:
+        for target_group, spectator_group in zip(target_groups,spectator_groups) if monitoring_spectators is not None else zip(target_groups,[[]]*len(target_groups)):
             idx = 0
             sweep_range = []
             mean_data = defaultdict(list)
@@ -507,6 +579,12 @@ class BenchmarkingMixin(
                         sequence=rb_sequence(
                             n_clifford=n_clifford,
                             targets=target_group,
+                            spectators=spectator_group,
+                            seed=seed,
+                        ) if monitoring_spectators is None else rb_sequence_monitoring_spectators(
+                            targets=target_group,
+                            spectators=spectator_group,
+                            n_cliffords=n_clifford,
                             seed=seed,
                         ),
                         mode="single",
@@ -593,6 +671,7 @@ class BenchmarkingMixin(
         x90: TargetMap[Waveform] | None = None,
         zx90: TargetMap[PulseSchedule] | None = None,
         in_parallel: bool = False,
+        monitoring_spectators:bool = False,
         shots: int | None = None,
         interval: float | None = None,
         plot: bool = True,
@@ -622,6 +701,7 @@ class BenchmarkingMixin(
                 x90=x90,
                 zx90=zx90,
                 in_parallel=in_parallel,
+                monitoring_spectators=monitoring_spectators,
                 shots=shots,
                 interval=interval,
                 plot=False,
@@ -638,6 +718,7 @@ class BenchmarkingMixin(
                 interleaved_waveform=interleaved_waveform,  # type: ignore
                 interleaved_clifford=interleaved_clifford,
                 in_parallel=in_parallel,
+                monitoring_spectators=monitoring_spectators,
                 shots=shots,
                 interval=interval,
                 plot=False,
