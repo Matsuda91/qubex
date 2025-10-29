@@ -1594,7 +1594,10 @@ class Experiment(
         qubit = Target.qubit_label(target)
         if rabi_amplitude_ratio is None:
             rabi_param = self.rabi_params.get(target)
-            default_amplitude = self.params.get_control_amplitude(qubit)
+            if self.targets[target].type == TargetType.CTRL_EF:
+                default_amplitude = self.params.get_ef_control_amplitude(qubit)
+            else:
+                default_amplitude = self.params.get_control_amplitude(qubit)
 
             if rabi_param is None:
                 raise ValueError(f"Rabi parameters for {target} are not stored.")
@@ -1916,7 +1919,7 @@ class Experiment(
             pi_pulse = x180[control_qubit]
 
         if cr_amplitude is None:
-            cr_amplitude = cr_param["cr_amplitude"]*coeff_value
+            cr_amplitude = cr_param["cr_amplitude"] * coeff_value
         if cr_duration is None:
             cr_duration = cr_param["duration"]
         if cr_ramptime is None:
@@ -1926,7 +1929,7 @@ class Experiment(
         if cr_beta is None:
             cr_beta = cr_param["cr_beta"]
         if cancel_amplitude is None:
-            cancel_amplitude = cr_param["cancel_amplitude"]*coeff_value
+            cancel_amplitude = cr_param["cancel_amplitude"] * coeff_value
         if cancel_phase is None:
             cancel_phase = cr_param["cancel_phase"]
         if cancel_beta is None:

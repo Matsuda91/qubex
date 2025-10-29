@@ -57,6 +57,7 @@ from ..protocol import (
     MeasurementProtocol,
 )
 from ..rabi_param import RabiParam
+from ..result import Result
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +79,7 @@ class CharacterizationMixin(
         interval: float = DEFAULT_INTERVAL,
         plot: bool = True,
         save_image: bool = False,
-    ) -> dict:
+    ) -> Result:
         if targets is None:
             targets = self.qubit_labels
         elif isinstance(targets, str):
@@ -114,11 +115,14 @@ class CharacterizationMixin(
             signal[target] = np.abs(np.average(iq))
             noise[target] = np.std(iq)
             snr[target] = signal[target] / noise[target]
-        return {
-            "signal": signal,
-            "noise": noise,
-            "snr": snr,
-        }
+
+        return Result(
+            data={
+                "signal": signal,
+                "noise": noise,
+                "snr": snr,
+            }
+        )
 
     def sweep_readout_amplitude(
         self,
@@ -130,7 +134,7 @@ class CharacterizationMixin(
         shots: int = DEFAULT_SHOTS,
         interval: float = DEFAULT_INTERVAL,
         plot: bool = True,
-    ) -> dict:
+    ) -> Result:
         if targets is None:
             targets = self.qubit_labels
         elif isinstance(targets, str):
@@ -139,7 +143,7 @@ class CharacterizationMixin(
             targets = list(targets)
 
         if amplitude_range is None:
-            amplitude_range = np.linspace(0.0, 0.2, 51)
+            amplitude_range = np.linspace(0.0, 0.25, 51)
         else:
             amplitude_range = np.asarray(amplitude_range)
 
@@ -217,11 +221,13 @@ class CharacterizationMixin(
                     height=400,
                 )
 
-        return {
-            "signal": signal,
-            "noise": noise,
-            "snr": snr,
-        }
+        return Result(
+            data={
+                "signal": signal,
+                "noise": noise,
+                "snr": snr,
+            }
+        )
 
     def sweep_readout_duration(
         self,
@@ -233,7 +239,7 @@ class CharacterizationMixin(
         shots: int = DEFAULT_SHOTS,
         interval: float = DEFAULT_INTERVAL,
         plot: bool = True,
-    ) -> dict:
+    ) -> Result:
         if targets is None:
             targets = self.qubit_labels
         elif isinstance(targets, str):
@@ -317,11 +323,13 @@ class CharacterizationMixin(
                     height=400,
                 )
 
-        return {
-            "signal": signal,
-            "noise": noise,
-            "snr": snr,
-        }
+        return Result(
+            data={
+                "signal": signal,
+                "noise": noise,
+                "snr": snr,
+            }
+        )
 
     def chevron_pattern(
         self,
@@ -336,7 +344,7 @@ class CharacterizationMixin(
         interval: float = DEFAULT_INTERVAL,
         plot: bool = True,
         save_image: bool = True,
-    ) -> dict:
+    ) -> Result:
         if targets is None:
             targets = self.qubit_labels
         elif isinstance(targets, str):
@@ -478,21 +486,23 @@ class CharacterizationMixin(
         chevron_data = dict(sorted(chevron_data.items()))
         resonant_frequencies = dict(sorted(resonant_frequencies.items()))
 
-        return {
-            "time_range": time_range,
-            "detuning_range": detuning_range,
-            "frequencies": frequencies,
-            "chevron_data": chevron_data,
-            "rabi_rates": rabi_rates,
-            "resonant_frequencies": resonant_frequencies,
-        }
+        return Result(
+            data={
+                "time_range": time_range,
+                "detuning_range": detuning_range,
+                "frequencies": frequencies,
+                "chevron_data": chevron_data,
+                "rabi_rates": rabi_rates,
+                "resonant_frequencies": resonant_frequencies,
+            }
+        )
 
     def obtain_freq_rabi_relation(
         self,
         targets: Collection[str] | str | None = None,
         *,
-        detuning_range: ArrayLike = np.linspace(-0.01, 0.01, 21),
-        time_range: ArrayLike = np.arange(0, 101, 4),
+        detuning_range: ArrayLike | None = None,
+        time_range: ArrayLike | None = None,
         rabi_level: Literal["ge", "ef"] = "ge",
         shots: int = DEFAULT_SHOTS,
         interval: float = DEFAULT_INTERVAL,
@@ -505,8 +515,16 @@ class CharacterizationMixin(
         else:
             targets = list(targets)
 
-        detuning_range = np.array(detuning_range, dtype=np.float64)
-        time_range = np.array(time_range, dtype=np.float64)
+        if detuning_range is None:
+            detuning_range = np.linspace(-0.01, 0.01, 21)
+        else:
+            detuning_range = np.asarray(detuning_range, dtype=np.float64)
+
+        if time_range is None:
+            time_range = np.arange(0, 101, 4)
+        else:
+            time_range = np.asarray(time_range, dtype=np.float64)
+
         amplitudes = {
             target: self.params.get_control_amplitude(target) for target in targets
         }
@@ -636,7 +654,7 @@ class CharacterizationMixin(
         shots: int = DEFAULT_SHOTS,
         interval: float = DEFAULT_INTERVAL,
         plot: bool = True,
-    ) -> dict[str, float]:
+    ) -> Result:
         result = self.chevron_pattern(
             targets=targets,
             detuning_range=detuning_range,
@@ -653,18 +671,19 @@ class CharacterizationMixin(
         print("ge frequency (GHz):")
         for target, frequency in resonant_frequencies.items():
             print(f"    {target}: {frequency:.6f}")
-        return resonant_frequencies
+        return Result(data=resonant_frequencies)
 
     def calibrate_ef_control_frequency(
         self,
         targets: Collection[str] | str | None = None,
         *,
-        detuning_range: ArrayLike = np.linspace(-0.01, 0.01, 21),
-        time_range: ArrayLike = np.arange(0, 101, 4),
+        detuning_range: ArrayLike | None = None,
+        time_range: ArrayLike | None = None,
         shots: int = DEFAULT_SHOTS,
         interval: float = DEFAULT_INTERVAL,
         plot: bool = True,
-    ) -> dict[str, float]:
+        verbose: bool = False,
+    ) -> Result:
         if targets is None:
             targets = self.qubit_labels
         elif isinstance(targets, str):
@@ -672,8 +691,15 @@ class CharacterizationMixin(
         else:
             targets = list(targets)
 
-        detuning_range = np.array(detuning_range, dtype=np.float64)
-        time_range = np.array(time_range, dtype=np.float64)
+        if detuning_range is None:
+            detuning_range = np.linspace(-0.05, 0.05, 21)
+        else:
+            detuning_range = np.asarray(detuning_range, dtype=np.float64)
+
+        if time_range is None:
+            time_range = np.arange(0, 101, 4)
+        else:
+            time_range = np.asarray(time_range, dtype=np.float64)
 
         result = self.obtain_freq_rabi_relation(
             targets=targets,
@@ -682,23 +708,27 @@ class CharacterizationMixin(
             time_range=time_range,
             shots=shots,
             interval=interval,
-            plot=plot,
+            plot=plot and verbose,
         )
-        fit_data = {
-            target: data.fit()["f_resonance"] for target, data in result.data.items()
-        }
 
-        print("\nResults\n-------")
-        print("ef frequency (GHz):")
-        for target, fit in fit_data.items():
-            label = Target.ge_label(target)
-            print(f"    {label}: {fit:.6f}")
-        print("anharmonicity (GHz):")
-        for target, fit in fit_data.items():
-            label = Target.ge_label(target)
-            ge_freq = self.targets[label].frequency
-            print(f"    {label}: {fit - ge_freq:.6f}")
-        return fit_data
+        if plot:
+            fit_data = {
+                target: data.fit()["f_resonance"]
+                for target, data in result.data.items()
+            }
+
+            print("\nResults\n-------")
+            print("ef frequency (GHz):")
+            for target, fit in fit_data.items():
+                label = Target.ge_label(target)
+                print(f"    {label}: {fit:.6f}")
+            print("anharmonicity (GHz):")
+            for target, fit in fit_data.items():
+                label = Target.ge_label(target)
+                ge_freq = self.targets[label].frequency
+                print(f"    {label}: {fit - ge_freq:.6f}")
+
+        return Result(data=fit_data)
 
     def calibrate_readout_frequency(
         self,
@@ -711,7 +741,7 @@ class CharacterizationMixin(
         interval: float = DEFAULT_INTERVAL,
         plot: bool = True,
         save_image: bool = False,
-    ) -> dict[str, float]:
+    ) -> Result:
         if targets is None:
             targets = self.qubit_labels
         elif isinstance(targets, str):
@@ -782,7 +812,7 @@ class CharacterizationMixin(
         for target, freq in fit_data.items():
             print(f"{target}: {freq:.6f}")
 
-        return fit_data
+        return Result(data=fit_data)
 
     def t1_experiment(
         self,
@@ -1118,12 +1148,15 @@ class CharacterizationMixin(
         self,
         targets: Collection[str] | str | None = None,
         *,
-        time_range: ArrayLike = np.arange(0, 10001, 100),
+        time_range: ArrayLike | None = None,
         detuning: float = 0.001,
         shots: int = DEFAULT_SHOTS,
         interval: float = DEFAULT_INTERVAL,
         plot: bool = True,
-    ) -> dict:
+    ) -> Result:
+        if time_range is None:
+            time_range = np.arange(0, 10001, 100)
+
         if targets is None:
             targets = self.qubit_labels
         elif isinstance(targets, str):
@@ -1168,24 +1201,30 @@ class CharacterizationMixin(
             print(f"  Effective control frequency: {effective_freq[target]:.6f}")
             print("")
 
-        return {
-            "effective_freq": effective_freq,
-            "result_0": result_0,
-            "result_1": result_1,
-        }
+        return Result(
+            data={
+                "effective_freq": effective_freq,
+                "result_0": result_0,
+                "result_1": result_1,
+            }
+        )
 
     def jazz_experiment(
         self,
         target_qubit: str,
         spectator_qubit: str,
         *,
-        time_range: ArrayLike = np.arange(0, 2001, 100),
+        time_range: ArrayLike | None = None,
         x90: Waveform | TargetMap[Waveform] | None = None,
         x180: Waveform | TargetMap[Waveform] | None = None,
+        second_rotation_axis: Literal["X", "Y"] = "Y",
         shots: int = DEFAULT_SHOTS,
         interval: float = DEFAULT_INTERVAL,
         plot: bool = True,
-    ):
+    ) -> Result:
+        if time_range is None:
+            time_range = np.arange(0, 10001, 100)
+
         if x90 is None:
             x90 = {
                 target_qubit: self.get_hpi_pulse(target_qubit),
@@ -1214,7 +1253,10 @@ class CharacterizationMixin(
                 ps.add(target_qubit, x180[target_qubit])
                 ps.add(spectator_qubit, x180[spectator_qubit])
                 ps.add(target_qubit, Blank(tau))
-                ps.add(target_qubit, x90[target_qubit].scaled(-1))
+                if second_rotation_axis == "X":
+                    ps.add(target_qubit, x90[target_qubit].shifted(np.pi))
+                else:
+                    ps.add(target_qubit, x90[target_qubit].shifted(-np.pi / 2))
             return ps
 
         time_range = np.asarray(time_range)
@@ -1232,39 +1274,45 @@ class CharacterizationMixin(
         )
 
         fit_result = fitting.fit_cosine(
-            time_range * 2,
-            (1 - result.data[target_qubit].normalized) * 0.5,
+            time_range * 2e-3,
+            result.data[target_qubit].normalized,
             is_damped=True,
             plot=plot,
-            title=f"JAZZ : {target_qubit}-{spectator_qubit}",
-            xlabel="Wait time (ns)",
+            title=f"JAZZ experiment: {target_qubit}-{spectator_qubit}",
+            xlabel="Wait time (μs)",
             ylabel=f"Normalized value : {target_qubit}",
         )
 
-        xi = fit_result["f"]
+        if fit_result["status"] != "success":
+            raise RuntimeError("Fitting failed in JAZZ experiment.")
+
+        xi = fit_result["f"] * 1e-3
         zeta = 2 * xi
 
         print(f"ξ: {xi * 1e6:.2f} kHz")
         print(f"ζ: {zeta * 1e6:.2f} kHz")
 
-        return {
-            "xi": xi,
-            "zeta": zeta,
-            **fit_result,
-        }
+        return Result(
+            data={
+                "xi": xi,
+                "zeta": zeta,
+                **fit_result,
+            }
+        )
 
     def obtain_coupling_strength(
         self,
         target_qubit: str,
         spectator_qubit: str,
         *,
-        time_range: ArrayLike = np.arange(0, 20001, 500),
+        time_range: ArrayLike | None = None,
         x90: Waveform | TargetMap[Waveform] | None = None,
         x180: Waveform | TargetMap[Waveform] | None = None,
+        second_rotation_axis: Literal["X", "Y"] = "Y",
         shots: int = CALIBRATION_SHOTS,
         interval: float = DEFAULT_INTERVAL,
         plot: bool = True,
-    ) -> dict:
+    ) -> Result:
         qubit_1 = target_qubit
         qubit_2 = spectator_qubit
 
@@ -1274,6 +1322,7 @@ class CharacterizationMixin(
             time_range=time_range,
             x90=x90,
             x180=x180,
+            second_rotation_axis=second_rotation_axis,
             shots=shots,
             interval=interval,
             plot=plot,
@@ -1299,11 +1348,13 @@ class CharacterizationMixin(
         print(f"anharmonicity_2: {a_2 * 1e3:.2f} MHz")
         print(f"g: {g * 1e3:.2f} MHz")
 
-        return {
-            "xi": xi,
-            "zeta": zeta,
-            "g": g,
-        }
+        return Result(
+            data={
+                "xi": xi,
+                "zeta": zeta,
+                "g": g,
+            }
+        )
 
     @deprecated("Use `measure_electrical_delay` instead.")
     def measure_phase_shift(
@@ -1549,7 +1600,7 @@ class CharacterizationMixin(
 
     def scan_resonator_frequencies(
         self,
-        target: str,
+        target: str | None = None,
         *,
         frequency_range: ArrayLike | None = None,
         readout_amplitude: float | None = None,
@@ -1566,7 +1617,10 @@ class CharacterizationMixin(
         plot: bool = True,
         save_image: bool = False,
         filter: Literal["gaussian", "savgol"] | None = None,
-    ) -> dict:
+    ) -> Result:
+        if target is None:
+            target = self.qubit_labels[0]
+
         read_label = Target.read_label(target)
         qubit_label = Target.qubit_label(target)
         mux = self.experiment_system.get_mux_by_qubit(qubit_label)
@@ -1872,20 +1926,22 @@ class CharacterizationMixin(
                 height=450,
             )
 
-        return {
-            "peaks": peak_freqs,
-            "frequency_range": frequency_range,
-            "subranges": subranges,
-            "signals": signals,
-            "phases_unwrap": phases_unwrap,
-            "phases_diff": phases_diff,
-            "fig_phase": fig1,
-            "fig_phase_diff": fig2,
-        }
+        return Result(
+            data={
+                "peaks": peak_freqs,
+                "frequency_range": frequency_range,
+                "subranges": subranges,
+                "signals": signals,
+                "phases_unwrap": phases_unwrap,
+                "phases_diff": phases_diff,
+                "fig_phase": fig1,
+                "fig_phase_diff": fig2,
+            }
+        )
 
     def resonator_spectroscopy(
         self,
-        target: str,
+        target: str | None = None,
         *,
         frequency_range: ArrayLike | None = None,
         power_range: ArrayLike = np.arange(-60, 5, 5),
@@ -1895,7 +1951,10 @@ class CharacterizationMixin(
         interval: float = 0,
         plot: bool = True,
         save_image: bool = True,
-    ) -> dict:
+    ) -> Result:
+        if target is None:
+            target = self.qubit_labels[0]
+
         power_range = np.array(power_range)
         qubit_label = Target.qubit_label(target)
         mux = self.experiment_system.get_mux_by_qubit(qubit_label)
@@ -1968,12 +2027,14 @@ class CharacterizationMixin(
                 name=f"resonator_spectroscopy_{mux.label}",
             )
 
-        return {
-            "frequency_range": frequency_range,
-            "power_range": power_range,
-            "data": np.array(result),
-            "fig": fig,
-        }
+        return Result(
+            data={
+                "frequency_range": frequency_range,
+                "power_range": power_range,
+                "data": np.array(result),
+                "fig": fig,
+            }
+        )
 
     def measure_reflection_coefficient(
         self,
@@ -1989,7 +2050,7 @@ class CharacterizationMixin(
         interval: float = DEFAULT_INTERVAL,
         plot: bool = True,
         save_image: bool = True,
-    ) -> dict:
+    ) -> Result:
         qubit_label = Target.qubit_label(target)
         read_label = Target.read_label(target)
 
@@ -2077,11 +2138,13 @@ class CharacterizationMixin(
                 height=450,
             )
 
-        return {
-            "frequency_range": freq_range,
-            "reflection_coefficients": signals,
-            **fit_result,
-        }
+        return Result(
+            data={
+                "frequency_range": freq_range,
+                "reflection_coefficients": signals,
+                **fit_result,
+            }
+        )
 
     def scan_qubit_frequencies(
         self,
@@ -2099,7 +2162,7 @@ class CharacterizationMixin(
         interval: float | None = None,
         plot: bool = True,
         save_image: bool = False,
-    ) -> dict:
+    ) -> Result:
         # control and readout pulses
         qubit = Target.qubit_label(target)
         resonator = Target.read_label(target)
@@ -2324,22 +2387,24 @@ class CharacterizationMixin(
                 height=450,
             )
 
-        return {
-            "peaks": peak_freqs,
-            "frequency_guess": {
-                "f_ge": f_ge,
-                "f_gf": f_gf,
-                "f_ef": f_ef,
-                "anharmonicity": anharmonicity,
-            },
-            "frequency_range": frequency_range,
-            "subranges": subranges,
-            "readout_amplitude": readout_amplitude,
-            "signals": signals,
-            "amplitudes": amplitudes,
-            "phases": phases,
-            "fig": fig,
-        }
+        return Result(
+            data={
+                "peaks": peak_freqs,
+                "frequency_guess": {
+                    "f_ge": f_ge,
+                    "f_gf": f_gf,
+                    "f_ef": f_ef,
+                    "anharmonicity": anharmonicity,
+                },
+                "frequency_range": frequency_range,
+                "subranges": subranges,
+                "readout_amplitude": readout_amplitude,
+                "signals": signals,
+                "amplitudes": amplitudes,
+                "phases": phases,
+                "fig": fig,
+            }
+        )
 
     @deprecated("Use `measure_qubit_resonance` instead.")
     def estimate_control_amplitude(
@@ -2426,7 +2491,7 @@ class CharacterizationMixin(
         interval: float = DEFAULT_INTERVAL,
         plot: bool = True,
         save_image: bool = True,
-    ) -> dict:
+    ) -> Result:
         qubit_label = Target.qubit_label(target)
         qubit_frequency = self.qubits[qubit_label].frequency
 
@@ -2466,13 +2531,15 @@ class CharacterizationMixin(
 
         rabi_rate = fit_result.get("Omega")
         if rabi_rate is None:
-            return {
-                "frequency_range": frequency_range,
-                "phases": data,
-                "rabi_rate": None,
-                "estimated_amplitude": None,
-                "fig": None,
-            }
+            return Result(
+                data={
+                    "frequency_range": frequency_range,
+                    "phases": data,
+                    "rabi_rate": None,
+                    "estimated_amplitude": None,
+                    "fig": None,
+                }
+            )
         estimated_amplitude = target_rabi_rate / rabi_rate * control_amplitude
 
         if plot:
@@ -2500,14 +2567,16 @@ class CharacterizationMixin(
                 width=600,
                 height=300,
             )
-        return {
-            "frequency_range": frequency_range,
-            "phases": data,
-            "rabi_rate": rabi_rate,
-            "estimated_amplitude": estimated_amplitude,
-            "fig": fig,
-            **fit_result,
-        }
+        return Result(
+            data={
+                "frequency_range": frequency_range,
+                "phases": data,
+                "rabi_rate": rabi_rate,
+                "estimated_amplitude": estimated_amplitude,
+                "fig": fig,
+                **fit_result,
+            }
+        )
 
     def qubit_spectroscopy(
         self,
@@ -2520,7 +2589,7 @@ class CharacterizationMixin(
         interval: float | None = None,
         plot: bool = True,
         save_image: bool = True,
-    ) -> dict:
+    ) -> Result:
         power_range = np.array(power_range)
         result2d = []
         for power in tqdm(power_range):
@@ -2582,12 +2651,14 @@ class CharacterizationMixin(
                 height=300,
             )
 
-        return {
-            "frequency_range": result1d["frequency_range"],
-            "power_range": power_range,
-            "data": np.array(result2d),
-            "fig": fig,
-        }
+        return Result(
+            data={
+                "frequency_range": result1d["frequency_range"],
+                "power_range": power_range,
+                "data": np.array(result2d),
+                "fig": fig,
+            }
+        )
 
     def measure_dispersive_shift(
         self,
@@ -2602,7 +2673,7 @@ class CharacterizationMixin(
         interval: float = DEFAULT_INTERVAL,
         plot: bool = True,
         save_image: bool = True,
-    ) -> dict:
+    ) -> Result:
         result_0 = self.measure_reflection_coefficient(
             target,
             df=df,
@@ -2735,18 +2806,20 @@ class CharacterizationMixin(
                 height=300,
             )
 
-        return {
-            "f_0": f_0,
-            "f_1": f_1,
-            "dispersive_shift": dispersive_shift,
-            "optimal_frequency": optimal_frequency,
-            "frequency_range": frequency_range,
-            "signals_0": signals_0,
-            "signals_1": signals_1,
-            "phases_0": phases_0,
-            "phases_1": phases_1,
-            "fig": fig1,
-        }
+        return Result(
+            data={
+                "f_0": f_0,
+                "f_1": f_1,
+                "dispersive_shift": dispersive_shift,
+                "optimal_frequency": optimal_frequency,
+                "frequency_range": frequency_range,
+                "signals_0": signals_0,
+                "signals_1": signals_1,
+                "phases_0": phases_0,
+                "phases_1": phases_1,
+                "fig": fig1,
+            }
+        )
 
     def find_optimal_readout_frequency(
         self,
@@ -2760,7 +2833,7 @@ class CharacterizationMixin(
         interval: float = DEFAULT_INTERVAL,
         plot: bool = True,
         save_image: bool = True,
-    ) -> dict:
+    ) -> Result:
         if df is None:
             df = 0.0002
         if frequency_width is None:
@@ -2838,13 +2911,15 @@ class CharacterizationMixin(
                 height=300,
             )
 
-        return {
-            "optimal_frequency": optimal_frequency,
-            "frequency_range": frequency_range,
-            "signals_0": signals_0,
-            "signals_1": signals_1,
-            "fig": fig,
-        }
+        return Result(
+            data={
+                "optimal_frequency": optimal_frequency,
+                "frequency_range": frequency_range,
+                "signals_0": signals_0,
+                "signals_1": signals_1,
+                "fig": fig,
+            }
+        )
 
     def find_optimal_readout_amplitude(
         self,
@@ -2855,7 +2930,7 @@ class CharacterizationMixin(
         interval: float = DEFAULT_INTERVAL,
         plot: bool = True,
         save_image: bool = True,
-    ) -> dict:
+    ) -> Result:
         if amplitude_range is None:
             amplitude_range = np.arange(0.01, 0.21, 0.01)
         else:
@@ -2933,13 +3008,15 @@ class CharacterizationMixin(
                 height=300,
             )
 
-        return {
-            "optimal_amplitude": optimal_amplitude,
-            "amplitude_range": amplitude_range,
-            "signals_0": signals_0,
-            "signals_1": signals_1,
-            "fig": fig,
-        }
+        return Result(
+            data={
+                "optimal_amplitude": optimal_amplitude,
+                "amplitude_range": amplitude_range,
+                "signals_0": signals_0,
+                "signals_1": signals_1,
+                "fig": fig,
+            }
+        )
 
     def ckp_sequence(
         self,
@@ -3009,8 +3086,9 @@ class CharacterizationMixin(
         resonator_drive_amplitude: float | None = None,
         resonator_drive_duration: float | None = None,
         plot: bool = True,
+        verbose: bool = False,
         save_image: bool = True,
-    ) -> dict:
+    ) -> Result:
         if qubit_detuning_range is None:
             qubit_detuning_range = np.linspace(-0.03, 0.01, 30)
         else:
@@ -3054,7 +3132,7 @@ class CharacterizationMixin(
             f0 = fitting.fit_lorentzian(
                 x=qubit_frequency_range,
                 y=result1d,
-                plot=False,
+                plot=True if verbose else False,
             ).get("f0", np.nan)
             qubit_resonance_frequencies.append(f0)
             result2d.append(result1d)
@@ -3110,16 +3188,18 @@ class CharacterizationMixin(
             ylabel="Qubit drive frequency (GHz)",
         )
 
-        return {
-            "qubit_frequency_range": qubit_frequency_range,
-            "resonator_frequency_range": resonator_frequency_range,
-            "qubit_detuning_range": qubit_detuning_range,
-            "resonator_detuning_range": resonator_detuning_range,
-            "qubit_resonance_frequencies": qubit_resonance_frequencies,
-            "qubit_initial_state": qubit_initial_state,
-            "data": data,
-            "fit_result": fit_result,
-        }
+        return Result(
+            data={
+                "qubit_frequency_range": qubit_frequency_range,
+                "resonator_frequency_range": resonator_frequency_range,
+                "qubit_detuning_range": qubit_detuning_range,
+                "resonator_detuning_range": resonator_detuning_range,
+                "qubit_resonance_frequencies": qubit_resonance_frequencies,
+                "qubit_initial_state": qubit_initial_state,
+                "data": data,
+                "fit_result": fit_result,
+            }
+        )
 
     def ckp_experiment(
         self,
@@ -3131,8 +3211,9 @@ class CharacterizationMixin(
         resonator_drive_amplitude: float | None = None,
         resonator_drive_duration: float | None = None,
         plot: bool = True,
+        verbose: bool = False,
         save_image: bool = True,
-    ):
+    ) -> Result:
         if resonator_drive_amplitude is None:
             resonator_drive_amplitude = self.params.get_readout_amplitude(
                 Target.qubit_label(target)
@@ -3165,6 +3246,7 @@ class CharacterizationMixin(
             resonator_drive_amplitude=resonator_drive_amplitude,
             resonator_drive_duration=resonator_drive_duration,
             plot=plot,
+            verbose=verbose,
             save_image=save_image,
         )
         result_1 = self.ckp_measurement(
@@ -3177,6 +3259,7 @@ class CharacterizationMixin(
             resonator_drive_amplitude=resonator_drive_amplitude,
             resonator_drive_duration=resonator_drive_duration,
             plot=plot,
+            verbose=verbose,
             save_image=save_image,
         )
 
@@ -3299,17 +3382,76 @@ class CharacterizationMixin(
                 height=300,
             )
 
-        return {
-            "f_r_0": f_r_0,
-            "f_r_1": f_r_1,
-            "f_r": f_r,
-            "f_q": f_q,
-            "delta": delta,
-            "chi": chi,
-            "kappa": kappa,
-            "power": power,
-            "n": n_mean,
-            "n_crit": n_crit,
-            "result_0": result_0,
-            "result_1": result_1,
+        return Result(
+            data={
+                "f_r_0": f_r_0,
+                "f_r_1": f_r_1,
+                "f_r": f_r,
+                "f_q": f_q,
+                "delta": delta,
+                "chi": chi,
+                "kappa": kappa,
+                "power": power,
+                "n": n_mean,
+                "n_crit": n_crit,
+                "result_0": result_0,
+                "result_1": result_1,
+            }
+        )
+
+    def characterize_1q(
+        self,
+        targets: Collection[str] | str | None = None,
+        *,
+        shots: int = CALIBRATION_SHOTS,
+        interval: int = DEFAULT_INTERVAL,
+        plot: bool = True,
+        save_image: bool = True,
+    ) -> Result:
+        if targets is None:
+            targets = self.qubit_labels
+        elif isinstance(targets, str):
+            targets = [targets]
+        else:
+            targets = list(targets)
+
+        data = {
+            "t1_experiment": {},
+            "t2_experiment": {},
+            "ramsey_experiment": {},
         }
+
+        for target in targets:
+            try:
+                result = self.t1_experiment(
+                    target,
+                    shots=shots,
+                    interval=interval,
+                    plot=plot,
+                    save_image=save_image,
+                )
+                data["t1_experiment"][target] = result.data[target]
+
+                result = self.t2_experiment(
+                    target,
+                    shots=shots,
+                    interval=interval,
+                    plot=plot,
+                    save_image=save_image,
+                )
+                data["t2_experiment"][target] = result.data[target]
+
+                result = self.ramsey_experiment(
+                    target,
+                    shots=shots,
+                    interval=interval,
+                    plot=plot,
+                    save_image=save_image,
+                )
+                data["ramsey_experiment"][target] = result.data[target]
+
+            except Exception as e:
+                print(f"Characterization failed for {target}: {e}")
+                continue
+
+        return Result(data=data)

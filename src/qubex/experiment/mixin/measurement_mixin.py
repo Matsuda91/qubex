@@ -52,7 +52,6 @@ from ...pulse import (
     PulseArray,
     PulseSchedule,
     RampType,
-    Rect,
     VirtualZ,
     Waveform,
 )
@@ -73,6 +72,7 @@ from ..experiment_constants import (
 from ..experiment_result import ExperimentResult, RabiData, SweepData
 from ..protocol import BaseProtocol, MeasurementProtocol
 from ..rabi_param import RabiParam
+from ..result import Result
 
 logger = logging.getLogger(__name__)
 
@@ -300,7 +300,7 @@ class MeasurementMixin(
         readout_post_margin: float | None = None,
         add_pump_pulses: bool = False,
         plot: bool = True,
-    ) -> dict:
+    ) -> Result:
         if targets is None:
             targets = self.qubit_labels
         elif isinstance(targets, str):
@@ -330,10 +330,12 @@ class MeasurementMixin(
             for target in targets
         }
 
-        return {
-            "data": data,
-            "counts": counts,
-        }
+        return Result(
+            data={
+                "data": data,
+                "counts": counts,
+            }
+        )
 
     def obtain_reference_points(
         self,
@@ -342,7 +344,7 @@ class MeasurementMixin(
         shots: int | None = None,
         interval: float | None = None,
         store_reference_points: bool = True,
-    ) -> dict:
+    ) -> Result:
         if targets is None:
             targets = self.qubit_labels
         elif isinstance(targets, str):
@@ -370,11 +372,13 @@ class MeasurementMixin(
         if store_reference_points:
             self.calib_note._reference_phases.update(phase)
 
-        return {
-            "iq": iq,
-            "phase": phase,
-            "amplitude": amplitude,
-        }
+        return Result(
+            data={
+                "iq": iq,
+                "phase": phase,
+                "amplitude": amplitude,
+            }
+        )
 
     def sweep_parameter(
         self,
@@ -433,7 +437,7 @@ class MeasurementMixin(
             raise ValueError("Invalid sequence.")
 
         signals = defaultdict(list)
-        plotter = IQPlotter(self.state_centers)
+        plotter = IQPlotter({qubit: self.state_centers[qubit] for qubit in qubits})
 
         # initialize awgs and capture units
         self.reset_awg_and_capunits(qubits=qubits)
@@ -618,7 +622,7 @@ class MeasurementMixin(
         time_range = np.asarray(time_range)
 
         if ramptime is None:
-            ramptime = HPI_DURATION - HPI_RAMPTIME
+            ramptime = HPI_DURATION - HPI_RAMPTIME  # π/2
 
         if amplitudes is None:
             ampl = self.params.control_amplitude
@@ -690,7 +694,8 @@ class MeasurementMixin(
         ef_targets = [self.targets[ef] for ef in ef_labels]
 
         amplitudes = {
-            ef.label: self.params.get_control_amplitude(ef.qubit) for ef in ef_targets
+            ef.label: self.params.get_ef_control_amplitude(ef.qubit)
+            for ef in ef_targets
         }
 
         rabi_data = {}
@@ -880,7 +885,14 @@ class MeasurementMixin(
                 ps.barrier()
                 # apply the ef drive to induce the ef Rabi oscillation
                 for ef in ef_labels:
-                    ps.add(ef, Rect(duration=T, amplitude=amplitudes[ef]))
+                    ps.add(
+                        ef,
+                        FlatTop(
+                            duration=T + 2 * ramptime,
+                            amplitude=amplitudes[ef],
+                            tau=ramptime,
+                        ),
+                    )
             return ps
 
         # detune target frequencies if necessary
@@ -1011,7 +1023,7 @@ class MeasurementMixin(
         add_pump_pulses: bool = False,
         simultaneous: bool = False,
         plot: bool = True,
-    ) -> dict:
+    ) -> Result:
         if targets is None:
             targets = self.qubit_labels
         elif isinstance(targets, str):
@@ -1058,12 +1070,15 @@ class MeasurementMixin(
                 average_fidelities[target] = result["average_readout_fidelity"][target]
                 data[target] = result["data"]
                 classifiers[target] = result["classifiers"][target]
-            return {
-                "readout_fidelities": fidelities,
-                "average_readout_fidelity": average_fidelities,
-                "data": data,
-                "classifiers": classifiers,
-            }
+
+            return Result(
+                data={
+                    "readout_fidelities": fidelities,
+                    "average_readout_fidelity": average_fidelities,
+                    "data": data,
+                    "classifiers": classifiers,
+                }
+            )
 
     def _build_classifier(
         self,
@@ -1080,7 +1095,7 @@ class MeasurementMixin(
         readout_post_margin: float | None = None,
         add_pump_pulses: bool = False,
         plot: bool = True,
-    ) -> dict:
+    ) -> Result:
         if targets is None:
             targets = self.qubit_labels
         elif isinstance(targets, str):
@@ -1186,12 +1201,14 @@ class MeasurementMixin(
             for target in targets
         }
 
-        return {
-            "readout_fidelities": fidelities,
-            "average_readout_fidelity": average_fidelities,
-            "data": data,
-            "classifiers": classifiers,
-        }
+        return Result(
+            data={
+                "readout_fidelities": fidelities,
+                "average_readout_fidelity": average_fidelities,
+                "data": data,
+                "classifiers": classifiers,
+            }
+        )
 
     def measure_1q_state_fidelity(
         self,
@@ -1204,7 +1221,7 @@ class MeasurementMixin(
         reset_awg_and_capunits: bool = True,
         use_zvalues: bool = False,
         plot: bool = False,
-    ) -> dict:
+    ) -> Result:
         if waveform is None:
             measure_result = self.state_tomography(
                 sequence={target: []},
@@ -1254,16 +1271,18 @@ class MeasurementMixin(
         )
         print(f"  Target state vector: {target_state_vector}")
 
-        return {
-            "fidelity": fidelity,
-            "absolute_infidelity": np.abs(1 - fidelity),
-            "state_vector": state_vector,
-            "target_state_vector": target_state_vector,
-            "target_state": target_state,
-            "target": target,
-            "shots": shots,
-            "interval": interval,
-        }
+        return Result(
+            data={
+                "fidelity": fidelity,
+                "absolute_infidelity": np.abs(1 - fidelity),
+                "state_vector": state_vector,
+                "target_state_vector": target_state_vector,
+                "target_state": target_state,
+                "target": target,
+                "shots": shots,
+                "interval": interval,
+            }
+        )
 
     def state_tomography(
         self,
@@ -1277,7 +1296,7 @@ class MeasurementMixin(
         method: Literal["measure", "execute"] = "measure",
         use_zvalues: bool = False,
         plot: bool = False,
-    ) -> dict[str, tuple[float, float, float]]:
+    ) -> Result:
         if isinstance(sequence, PulseSchedule):
             sequence = sequence.get_sequences()
         else:
@@ -1380,7 +1399,7 @@ class MeasurementMixin(
             )
             for qubit, values in buffer.items()
         }
-        return result
+        return Result(data=result)
 
     def state_evolution_tomography(
         self,
@@ -1397,7 +1416,7 @@ class MeasurementMixin(
         reset_awg_and_capunits: bool = True,
         method: Literal["measure", "execute"] = "measure",
         plot: bool = True,
-    ) -> dict[str, NDArray[np.float64]]:
+    ) -> Result:
         buffer: dict[str, list[tuple[float, float, float]]] = defaultdict(list)
 
         if reset_awg_and_capunits:
@@ -1431,7 +1450,7 @@ class MeasurementMixin(
                 print(f"State evolution : {target}")
                 viz.display_bloch_sphere(states)
 
-        return result
+        return Result(data=result)
 
     def partial_waveform(self, waveform: Waveform, index: int) -> Waveform:
         """Returns a partial waveform up to the given index."""
@@ -1493,7 +1512,7 @@ class MeasurementMixin(
         interval: float = DEFAULT_INTERVAL,
         method: Literal["measure", "execute"] = "measure",
         plot: bool = True,
-    ) -> TargetMap[NDArray[np.float64]]:
+    ) -> Result:
         self.validate_rabi_params()
 
         if isinstance(sequence, PulseSchedule):
@@ -1694,7 +1713,7 @@ class MeasurementMixin(
         plot_mitigated: bool = True,
         save_image: bool = True,
         reset_awg_and_capunits: bool = True,
-    ) -> dict:
+    ) -> Result:
         if self.state_centers is None:
             self.build_classifier(plot=False)
 
@@ -1791,12 +1810,14 @@ class MeasurementMixin(
                 f"bell_state_measurement_{control_qubit}-{target_qubit}",
             )
 
-        return {
-            "raw": prob_arr_raw,
-            "mitigated": prob_arr_mitigated,
-            "result": result,
-            "figure": fig,
-        }
+        return Result(
+            data={
+                "raw": prob_arr_raw,
+                "mitigated": prob_arr_mitigated,
+                "result": result,
+                "figure": fig,
+            }
+        )
 
     def bell_state_tomography(
         self,
@@ -1810,7 +1831,7 @@ class MeasurementMixin(
         plot: bool = True,
         save_image: bool = True,
         mle_fit: bool = True,
-    ) -> dict:
+    ) -> Result:
         n_qubits = 2
         dim = 2**n_qubits
         probabilities = {}
@@ -1892,13 +1913,15 @@ class MeasurementMixin(
             file_name=f"bell_state_tomography_{control_qubit}-{target_qubit}",
         )["figure"]
 
-        return {
-            "probabilities": probabilities,
-            "expected_values": expected_values,
-            "density_matrix": rho,
-            "fidelity": fidelity,
-            "figure": fig,
-        }
+        return Result(
+            data={
+                "probabilities": probabilities,
+                "expected_values": expected_values,
+                "density_matrix": rho,
+                "fidelity": fidelity,
+                "figure": fig,
+            }
+        )
 
     def create_entangle_sequence(
         self,
@@ -2152,7 +2175,7 @@ class MeasurementMixin(
         interval: float = DEFAULT_INTERVAL,
         plot: bool = True,
         save_image: bool = True,
-    ) -> dict:
+    ) -> Result:
         """
         Measure the n-qubit GHZ state in the specified bases.
         Returns dict with 'raw', 'mitigated', 'result', 'figure'.
@@ -2257,12 +2280,14 @@ class MeasurementMixin(
                 f"ghz_state_measurement_{'-'.join(qubits)}",
             )
 
-        return {
-            "raw": prob_arr_raw,
-            "mitigated": prob_arr_mitigated,
-            "result": result,
-            "figure": fig,
-        }
+        return Result(
+            data={
+                "raw": prob_arr_raw,
+                "mitigated": prob_arr_mitigated,
+                "result": result,
+                "figure": fig,
+            }
+        )
 
     def ghz_state_tomography(
         self,
@@ -2282,7 +2307,7 @@ class MeasurementMixin(
         show_sequence: bool = True,
         save_image: bool = True,
         mle_fit: bool = True,
-    ) -> dict:
+    ) -> Result:
         """
         Performs full state tomography on a n-qubit GHZ state.
 
@@ -2462,7 +2487,7 @@ class MeasurementMixin(
                     "figure": fig_mle,
                 }
 
-        return result
+        return Result(data=result)
 
     def create_mqc_sequence(
         self,
@@ -2532,8 +2557,7 @@ class MeasurementMixin(
         cpmg_duration_unit: float | None = None,
         shots: int = DEFAULT_SHOTS,
         interval: float = DEFAULT_INTERVAL,
-        return_result: bool = False,
-    ):
+    ) -> Result:
         qubits: list[str] = []
         source_qubits: list[str] = []
         steps: list[tuple[str, str]] = []
@@ -2637,12 +2661,13 @@ class MeasurementMixin(
                 result.data[source_qubit].normalized,
             )
 
-        if return_result:
-            return {
+        return Result(
+            data={
                 "phi_range": phi_range,
                 "result": result,
                 "coherences": coherences,
             }
+        )
 
     @staticmethod
     def fourier_analysis(
@@ -2650,7 +2675,7 @@ class MeasurementMixin(
         *,
         qubit: str | None = None,
         title="Fourier analysis",
-    ) -> dict:
+    ) -> Result:
         data = np.asarray(data)
 
         S = (data + 1) / 2
@@ -2700,11 +2725,13 @@ class MeasurementMixin(
             format="svg",
         )
 
-        return {
-            "figure": fig,
-            "I": I,
-            "C": C,
-        }
+        return Result(
+            data={
+                "figure": fig,
+                "I": I,
+                "C": C,
+            }
+        )
 
     def parity_oscillation(
         self,
@@ -2724,7 +2751,7 @@ class MeasurementMixin(
         readout_mitigation: bool = True,
         shots: int = DEFAULT_SHOTS,
         interval: float = DEFAULT_INTERVAL,
-    ) -> dict:
+    ) -> Result:
         if initialization_pulse is None:
             initialization_pulse = "Y90"
 
@@ -2878,12 +2905,14 @@ class MeasurementMixin(
             parities_raw,
         )
 
-        return {
-            "phi_range": phi_range,
-            "result": result,
-            "parities_raw": parities_raw,
-            "parities_mit": parities_mit,
-        }
+        return Result(
+            data={
+                "phi_range": phi_range,
+                "result": result,
+                "parities_raw": parities_raw,
+                "parities_mit": parities_mit,
+            }
+        )
 
     def create_1d_cluster_sequence(
         self,
@@ -3340,7 +3369,7 @@ class MeasurementMixin(
         plot: bool = True,
         method: str = "execute",
         reset_awg_and_capunits: bool = True,
-    ):
+    ) -> Result:
         if plot:
             seq = self.create_1d_cluster_sequence(
                 qubits,
@@ -3430,15 +3459,17 @@ class MeasurementMixin(
                 }
             )
 
-        return {
-            "negativities_max": negativities_max,
-            "negativities_min": negativities_min,
-            "negativities_med": negativities_med,
-            "negativities_avg": negativities_avg,
-            "negativities_std": negativities_std,
-            "negativities": negativities,
-            "figures": figures,
-        }
+        return Result(
+            data={
+                "negativities_max": negativities_max,
+                "negativities_min": negativities_min,
+                "negativities_med": negativities_med,
+                "negativities_avg": negativities_avg,
+                "negativities_std": negativities_std,
+                "negativities": negativities,
+                "figures": figures,
+            }
+        )
 
     @staticmethod
     def partial_transpose(rho: NDArray, subsystem: int = 1) -> NDArray:
@@ -4300,8 +4331,7 @@ class MeasurementMixin(
         reset_awg_and_capunits: bool = True,
         n_bootstrap: int | None = 200,
         bootstrap_mle: bool = False,
-        return_result: bool = False,
-    ):
+    ) -> Result:
         if plot:
             seq = self.create_graph_sequence(
                 graph=graph,
@@ -4488,8 +4518,8 @@ class MeasurementMixin(
                 show_data=True,
             )
 
-        if return_result:
-            return {
+        return Result(
+            data={
                 "negativities": negativities,
                 "negativity_errors": negativity_errors,
                 "negativities_max": negativities_max,
@@ -4500,6 +4530,7 @@ class MeasurementMixin(
                 "nonzero_edges": nonzero_edges,
                 "figures": figures,
             }
+        )
 
     def _canonical_edge(
         self, edge: str | tuple[int | str, int | str]
@@ -4530,7 +4561,7 @@ class MeasurementMixin(
         plot: bool = False,
         save_data: bool = True,
         save_path: Path | str | None = None,
-    ) -> dict[str, float]:
+    ) -> Result:
         # TODO: move this to an appropriate location
         fidelities = {}
 
@@ -4609,7 +4640,7 @@ class MeasurementMixin(
                 save_path=save_path,
             )
 
-        return sorted_fidelities
+        return Result(data=sorted_fidelities)
 
     def measure_bell_states(
         self,
@@ -4619,7 +4650,6 @@ class MeasurementMixin(
         control_basis: str = "Z",
         target_basis: str = "Z",
         readout_mitigation: bool = True,
-        return_result: bool = False,
         in_parallel: bool = True,
         n_cols: int = 6,
         threshold: float = 0.0,
@@ -4630,7 +4660,7 @@ class MeasurementMixin(
         interval: float = DEFAULT_INTERVAL,
         reset_awg_and_capunits: bool = True,
         reset_awg_and_capunits_each_time: bool = True,
-    ):
+    ) -> Result:
         if targets is None:
             try:
                 fidelities = self.load_property("bell_state_fidelity")
@@ -4862,5 +4892,9 @@ class MeasurementMixin(
                 }
             )
 
-        if return_result:
-            return {"data": results, "figure": fig}
+        return Result(
+            data={
+                "data": results,
+                "figure": fig,
+            }
+        )
