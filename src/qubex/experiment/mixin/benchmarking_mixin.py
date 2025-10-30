@@ -636,8 +636,9 @@ class BenchmarkingMixin(
             n_clifford: int,
             seed: int,
         ) -> PulseSchedule:
+            rb_sequence = {}
             with PulseSchedule([target]+spectators) as ps:
-                rb_sequence = self.rb_sequence_1q(
+                rb_sequence[target] = self.rb_sequence_1q(
                     target,
                     n=n_clifford,
                     x90=x90.get(target) if x90 else None,
@@ -647,7 +648,7 @@ class BenchmarkingMixin(
                     interleaved_clifford=interleaved_clifford,
                     seed=seed,
                 )
-                ps.add(target, rb_sequence)
+                ps.add(target, rb_sequence[target])
             return ps
 
         return_data = {}
@@ -690,10 +691,11 @@ class BenchmarkingMixin(
                     trial_data[target].append((z + 1) / 2)
 
             check_vals = {}
-            mean = np.mean(trial_data[target])
-            std = np.std(trial_data[target])
-            mean_data[target].append(mean)
-            std_data[target].append(std)
+            for target_ in [target]+spectators:
+                mean = np.mean(trial_data[target_])
+                std = np.std(trial_data[target_])
+                mean_data[target_].append(mean)
+                std_data[target_].append(std)
             check_vals[target] = mean - std * 0.5
 
             max_check_val = np.max(list(check_vals.values()))
@@ -705,35 +707,36 @@ class BenchmarkingMixin(
         mean_data = {target: np.array(data) for target, data in mean_data.items()}
         std_data = {target: np.array(data) for target, data in std_data.items()}
 
-        mean = mean_data[target]
-        std = std_data[target] if n_trials > 1 else None
+        for target_ in [target]+spectators:
+            mean = mean_data[target_]
+            std = std_data[target_] if n_trials > 1 else None
 
-        fit_result = fitting.fit_rb(
-            target=target,
-            x=sweep_range,
-            y=mean,
-            error_y=std,
-            bounds=((0, 0, 0), (0.5, 1, 1)),
-            title="Randomized benchmarking",
-            xlabel="Number of Cliffords",
-            ylabel="Normalized signal",
-            xaxis_type=xaxis_type,
-            yaxis_type="linear",
-            plot=plot,
-        )
-
-        if save_image:
-            viz.save_figure_image(
-                fit_result["fig"],
-                name=f"rb_experiment_1q_{target}",
+            fit_result = fitting.fit_rb(
+                target=target_,
+                x=sweep_range,
+                y=mean,
+                error_y=std,
+                bounds=((0, 0, 0), (0.5, 1, 1)),
+                title="Randomized benchmarking",
+                xlabel="Number of Cliffords",
+                ylabel="Normalized signal",
+                xaxis_type=xaxis_type,
+                yaxis_type="linear",
+                plot=plot,
             )
 
-        return_data[target] = {
-            "n_cliffords": sweep_range,
-            "mean": mean,
-            "std": std,
-            **fit_result,
-        }
+            if save_image:
+                viz.save_figure_image(
+                    fit_result["fig"],
+                    name=f"rb_experiment_1q_{target_}",
+                )
+
+            return_data[target_] = {
+                "n_cliffords": sweep_range,
+                "mean": mean,
+                "std": std,
+                **fit_result,
+            }
 
         return return_data
     
@@ -761,8 +764,10 @@ class BenchmarkingMixin(
             raise ValueError("State classifiers are not built.")
 
 
-        if self.experiment_system.get_target(target).is_cr and target in self.calib_note.cr_params:
-            raise ValueError(f"`{target}` is not a 2Q target and is in the calibration notes.")
+        if not self.experiment_system.get_target(target).is_cr:
+            raise ValueError(f"`{target}` is not a 2Q target.")
+        if target not in self.calib_note.cr_params:
+            raise ValueError(f"`{target}` is in the calibration notes.")
 
         if n_cliffords_range is not None:
             n_cliffords_range = np.array(n_cliffords_range, dtype=int)
@@ -808,8 +813,9 @@ class BenchmarkingMixin(
             n_clifford: int,
             seed: int,
         ) -> PulseSchedule:
-            with PulseSchedule([target] + spectators) as ps:                
-                seq = self.rb_sequence_2q(
+            irb_sequence= {}
+            with PulseSchedule([target] + spectators) as ps:
+                irb_sequence[target] = self.rb_sequence_2q(
                     target=target,
                     n=n_clifford,
                     x90=x90,
@@ -820,7 +826,7 @@ class BenchmarkingMixin(
                     interleaved_clifford=interleaved_clifford,
                     seed=seed,
                 )
-                ps.add(target,seq)
+                ps.call(irb_sequence[target])
             return ps
 
         return_data = {}
@@ -846,8 +852,8 @@ class BenchmarkingMixin(
                 seed = int(seed)  # Ensure seed is an integer
                 result = self.measure(
                     sequence=rb_sequence(
-                        n_clifford=n_clifford,
                         target=target,
+                        n_clifford=n_clifford,
                         spectators=spectators,
                         seed=seed,
                     ),
@@ -857,23 +863,34 @@ class BenchmarkingMixin(
                     plot=False,
                 )
 
-                control_qubit, target_qubit = Target.cr_qubit_pair(target)
-                if mitigate_readout:
-                    prob = result.get_mitigated_probabilities(
-                        [control_qubit, target_qubit]
-                    )
-                else:
-                    prob = result.get_probabilities(
-                        [control_qubit, target_qubit]
-                    )
-                trial_data[target].append(prob["00"])
+                for target_ in [target]+spectators:
+                    is_2q = self.experiment_system.get_target(target_).is_cr
+                    if is_2q:
+                        control_qubit, target_qubit = Target.cr_qubit_pair(target_)
+                        if mitigate_readout:
+                            prob = result.get_mitigated_probabilities(
+                                [control_qubit, target_qubit]
+                            )
+                        else:
+                            prob = result.get_probabilities(
+                                [control_qubit, target_qubit]
+                            )
+                        trial_data[target].append(prob["00"])
+                    else:
+                        if mitigate_readout:
+                            prob = result.get_mitigated_probabilities([target_])
+                        else:
+                            prob = result.get_probabilities([target_])
+                        trial_data[target_].append(prob["0"])
+
 
             check_vals = {}
-            mean = np.mean(trial_data[target])
-            std = np.std(trial_data[target])
-            mean_data[target].append(mean)
-            std_data[target].append(std)
-            check_vals[target] = mean - std * 0.5
+            for target_ in [target]+spectators:
+                mean = np.mean(trial_data[target_])
+                std = np.std(trial_data[target_])
+                mean_data[target_].append(mean)
+                std_data[target_].append(std)
+            check_vals[target_] = mean - std * 0.5
 
             max_check_val = np.max(list(check_vals.values()))
             if n_cliffords_range is None and max_check_val < 0.25:
@@ -884,35 +901,36 @@ class BenchmarkingMixin(
         mean_data = {target: np.array(data) for target, data in mean_data.items()}
         std_data = {target: np.array(data) for target, data in std_data.items()}
 
-        mean = mean_data[target]
-        std = std_data[target] if n_trials > 1 else None
+        for target_ in [target]+spectators:
+            mean = mean_data[target_]
+            std = std_data[target_] if n_trials > 1 else None
 
-        fit_result = fitting.fit_rb(
-            target=target,
-            x=sweep_range,
-            y=mean,
-            error_y=std,
-            dimension=4,
-            title="Randomized benchmarking",
-            xlabel="Number of Cliffords",
-            ylabel="Normalized signal",
-            xaxis_type=xaxis_type,
-            yaxis_type="linear",
-            plot=plot,
-        )
-
-        if save_image:
-            viz.save_figure_image(
-                fit_result["fig"],
-                name=f"rb_experiment_2q_{target}",
+            fit_result = fitting.fit_rb(
+                target=target,
+                x=sweep_range,
+                y=mean,
+                error_y=std,
+                dimension=4,
+                title="Randomized benchmarking",
+                xlabel="Number of Cliffords",
+                ylabel="Normalized signal",
+                xaxis_type=xaxis_type,
+                yaxis_type="linear",
+                plot=plot,
             )
 
-        return_data[target] = {
-            "n_cliffords": sweep_range,
-            "mean": mean,
-            "std": std,
-            **fit_result,
-        }
+            if save_image:
+                viz.save_figure_image(
+                    fit_result["fig"],
+                    name=f"rb_experiment_2q_{target_}",
+                )
+
+            return_data[target_] = {
+                "n_cliffords": sweep_range,
+                "mean": mean,
+                "std": std,
+                **fit_result,
+            }
 
         return return_data
 
@@ -1214,12 +1232,12 @@ class BenchmarkingMixin(
             )
 
         results = {}
-        for target in [target]+spectators:
-            rb_n_cliffords = rb_result[target]["n_cliffords"]
-            rb_mean = rb_result[target]["mean"]
-            rb_std = rb_result[target]["std"]
+        for target_ in [target]+spectators:
+            rb_n_cliffords = rb_result[target_]["n_cliffords"]
+            rb_mean = rb_result[target_]["mean"]
+            rb_std = rb_result[target_]["std"]
             rb_fit_result = fitting.fit_rb(
-                target=target,
+                target=target_,
                 x=rb_n_cliffords,
                 y=rb_mean,
                 error_y=rb_std,
@@ -1234,11 +1252,11 @@ class BenchmarkingMixin(
             avg_gate_fidelity_rb = rb_fit_result["avg_gate_fidelity"]
             avg_gate_fidelity_err_rb = rb_fit_result["avg_gate_fidelity_err"]
 
-            irb_n_cliffords = irb_result[target]["n_cliffords"]
-            irb_mean = irb_result[target]["mean"]
-            irb_std = irb_result[target]["std"]
+            irb_n_cliffords = irb_result[target_]["n_cliffords"]
+            irb_mean = irb_result[target_]["mean"]
+            irb_std = irb_result[target_]["std"]
             irb_fit_result = fitting.fit_rb(
-                target=target,
+                target=target_,
                 x=irb_n_cliffords,
                 y=irb_mean,
                 error_y=irb_std,
@@ -1263,7 +1281,7 @@ class BenchmarkingMixin(
             )
 
             fig = fitting.plot_irb(
-                target=target,
+                target=target_,
                 x=rb_n_cliffords,
                 y_rb=rb_mean,
                 y_irb=irb_mean,
@@ -1311,7 +1329,7 @@ class BenchmarkingMixin(
                     f"Warning: Gate error ({gate_error * 100:.3f}%) is too low compared to the average gate error (RB) ({avg_gate_error_rb * 100:.3f}%)."
                 )
 
-            results[target] = {
+            results[target_] = {
                 "gate_error": gate_error,
                 "gate_fidelity": gate_fidelity,
                 "gate_fidelity_err": gate_fidelity_err,
@@ -1462,7 +1480,7 @@ class BenchmarkingMixin(
         interval: float | None = None,
         plot: bool = True,
         save_image: bool = True,
-    ) -> dict:      
+    ) -> dict: 
         return self.irb_experiment_with_spectators(
             target=target,
             spectators=spectators,
