@@ -456,7 +456,7 @@ class BenchmarkingMixin(
             def get_spectator_groups(self:BenchmarkingMixin,targets:list[str], in_parallel=True, spectator="control"):
 
                 target_subspaces = [label for target in targets for label in Target.cr_qubit_pair(target)]
-                spectator_groups = []
+                spectator_groups: list = []
                 for target in targets:
                     control_qubit, target_qubit = Target.cr_qubit_pair(target)
                     if spectator == "control":
@@ -510,7 +510,7 @@ class BenchmarkingMixin(
         def rb_sequence_monitoring_spectators(
                 targets:list[str],
                 spectators:list[str],
-                n_cliffords: int,
+                n_clifford: int,
                 seed: int,
         ):
             rb_seq = rb_sequence(
@@ -584,7 +584,7 @@ class BenchmarkingMixin(
                         ) if monitoring_spectators is None else rb_sequence_monitoring_spectators(
                             targets=target_group,
                             spectators=spectator_group,
-                            n_cliffords=n_clifford,
+                            n_clifford=n_clifford,
                             seed=seed,
                         ),
                         mode="single",
@@ -604,7 +604,12 @@ class BenchmarkingMixin(
                                 [control_qubit, target_qubit]
                             )
                         trial_data[target].append(prob["00"])
-
+                    for spectator in spectator_group:
+                        if mitigate_readout:
+                            prob = result.get_mitigated_probabilities([spectator])
+                        else:
+                            prob = result.get_probabilities([spectator])
+                        trial_data[spectator].append(prob["0"])
                 check_vals = {}
 
                 for target in target_group:
