@@ -612,13 +612,17 @@ class BenchmarkingMixin(
                         trial_data[spectator].append(prob["0"])
                 check_vals = {}
 
-                for target in target_group + spectator_group:
+                for target in target_group:
                     mean = np.mean(trial_data[target])
                     std = np.std(trial_data[target])
                     mean_data[target].append(mean)
                     std_data[target].append(std)
                     check_vals[target] = mean - std * 0.5
-
+                for spectator in spectator_group:
+                    mean = np.mean(trial_data[spectator])
+                    std = np.std(trial_data[spectator])
+                    mean_data[spectator].append(mean)
+                    std_data[spectator].append(std)
 
                 max_check_val = np.max(list(check_vals.values()))
                 if n_cliffords_range is None and max_check_val < 0.25:
