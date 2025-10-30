@@ -1463,9 +1463,9 @@ class BenchmarkingMixin(
         plot: bool = True,
         save_image: bool = True,
     ) -> dict:      
-        
-        results = self.irb_experiment(
-            targets=[target] + spectators,
+        return self.irb_experiment_with_spectators(
+            target=target,
+            spectators=spectators,
             interleaved_clifford=interleaved_clifford,
             interleaved_waveform=interleaved_waveform,
             n_cliffords_range=n_cliffords_range,
