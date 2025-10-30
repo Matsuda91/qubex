@@ -386,14 +386,14 @@ class BenchmarkingMixin(
         interleaved_clifford: Clifford | None = None,
         interleaved_waveform: TargetMap[PulseSchedule] | None = None,
         in_parallel: bool = False,
-        monitoring_spectators:bool = False,
+        monitoring_spectators: dict | None = None,
         mitigate_readout: bool = True,
         shots: int | None = None,
         interval: float | None = None,
         xaxis_type: Literal["linear", "log"] | None = None,
         plot: bool = True,
         save_image: bool = True,
-    ):
+    ) -> dict:
         if self.state_centers is None:
             raise ValueError("State classifiers are not built.")
 
@@ -453,25 +453,25 @@ class BenchmarkingMixin(
                 raise ValueError(f"`{target}` is not a 2Q target.")
         
         if monitoring_spectators is not None:
-            def get_spectator_groups(self:BenchmarkingMixin,targets:list[str], in_parallel=True, spectator="control"):
+            def get_spectator_groups(self:BenchmarkingMixin,targets:list[str], in_parallel=True, spectator_type="control"):
 
                 target_subspaces = [label for target in targets for label in Target.cr_qubit_pair(target)]
                 spectator_groups: list = []
                 for target in targets:
                     control_qubit, target_qubit = Target.cr_qubit_pair(target)
-                    if spectator == "control":
+                    if spectator_type == "control":
                         spectators = [
                             qubit.label for qubit in self.get_spectators(control_qubit)
                         ]
-                    elif spectator == "target":
+                    elif spectator_type == "target":
                         spectators = [
                             qubit.label for qubit in self.get_spectators(target_qubit)
                         ]
-                    elif spectator == "both":
+                    elif spectator_type == "both":
                         spectators = [
                             qubit.label for qubit in self.get_spectators(control_qubit)
                         ] + [qubit.label for qubit in self.get_spectators(target_qubit)]
-                    elif spectator == "all":
+                    elif spectator_type == "all":
                         spectators = [
                             label
                             for label in self.qubit_labels
@@ -499,17 +499,22 @@ class BenchmarkingMixin(
                                 ],
                         )
                 return spectator_groups
-            
+
+            _ = monitoring_spectators["type"]
+            initial_state_index = monitoring_spectators["initial_state_index"]
+
             spectator_groups = get_spectator_groups(
                 self,
                 targets=targets,
                 in_parallel=in_parallel,
-                spectator="control"
+                spectator_type="control"
             )
 
         def rb_sequence_monitoring_spectators(
                 targets:list[str],
                 spectators:list[str],
+                initial_state_index:TargetMap[str],
+                hpi_pulse: TargetMap[Waveform],
                 n_clifford: int,
                 seed: int,
         ):
@@ -519,9 +524,28 @@ class BenchmarkingMixin(
                 seed=seed,
             )
             with PulseSchedule(spectators) as ps:
+                for spectator in spectators:
+                    if initial_state_index == "0":
+                        pass
+                    elif initial_state_index == "1":
+                        ps.add(
+                            spectator,
+                            hpi_pulse[spectator],
+                        )
+                    elif initial_state_index == "+":
+                        ps.add(
+                            spectator,
+                            hpi_pulse[spectator],
+                        )
+                    elif initial_state_index == "+i":
+                        ps.add(
+                            spectator,
+                            hpi_pulse[spectator].shifted(-np.pi / 2),
+                        )
+                ps.barrier()
                 ps.call(rb_seq)
             return ps
-            
+        
         
         def rb_sequence(
             targets: list[str],
@@ -579,11 +603,12 @@ class BenchmarkingMixin(
                         sequence=rb_sequence(
                             n_clifford=n_clifford,
                             targets=target_group,
-                            spectators=spectator_group,
                             seed=seed,
                         ) if monitoring_spectators is None else rb_sequence_monitoring_spectators(
                             targets=target_group,
                             spectators=spectator_group,
+                            hpi_pulse=self.drag_hpi_pulse,
+                            initial_state_index=initial_state_index,
                             n_clifford=n_clifford,
                             seed=seed,
                         ),
@@ -604,12 +629,6 @@ class BenchmarkingMixin(
                                 [control_qubit, target_qubit]
                             )
                         trial_data[target].append(prob["00"])
-                    for spectator in spectator_group:
-                        if mitigate_readout:
-                            prob = result.get_mitigated_probabilities([spectator])
-                        else:
-                            prob = result.get_probabilities([spectator])
-                        trial_data[spectator].append(prob["0"])
                 check_vals = {}
 
                 for target in target_group:
@@ -681,7 +700,7 @@ class BenchmarkingMixin(
         x90: TargetMap[Waveform] | None = None,
         zx90: TargetMap[PulseSchedule] | None = None,
         in_parallel: bool = False,
-        monitoring_spectators:bool = False,
+        monitoring_spectators: dict | None = None,
         shots: int | None = None,
         interval: float | None = None,
         plot: bool = True,
@@ -714,7 +733,7 @@ class BenchmarkingMixin(
                 monitoring_spectators=monitoring_spectators,
                 shots=shots,
                 interval=interval,
-                plot=False,
+                plot=True,
                 save_image=False,
             )
             irb_result = self.rb_experiment_2q(
@@ -731,7 +750,7 @@ class BenchmarkingMixin(
                 monitoring_spectators=monitoring_spectators,
                 shots=shots,
                 interval=interval,
-                plot=False,
+                plot=True,
                 save_image=False,
             )
         else:
@@ -945,7 +964,7 @@ class BenchmarkingMixin(
         x90: TargetMap[Waveform] | None = None,
         zx90: TargetMap[PulseSchedule] | None = None,
         in_parallel: bool = False,
-        monitoring_spectators: bool = False,
+        monitoring_spectators: dict|None = None,
         shots: int | None = None,
         interval: float | None = None,
         plot: bool = True,
