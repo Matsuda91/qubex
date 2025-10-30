@@ -654,7 +654,7 @@ class BenchmarkingMixin(
                 if save_image:
                     viz.save_figure_image(
                         fit_result["fig"],
-                        name=f"rb_experiment_1q_{target}",
+                        name=f"rb_experiment_2q_{target}",
                     )
 
                 return_data[target] = {
