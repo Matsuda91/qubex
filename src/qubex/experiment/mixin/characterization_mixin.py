@@ -1092,13 +1092,7 @@ class CharacterizationMixin(
 
                     # Ramsey sequence for the target qubit
                     for target in target_qubits:
-                        x90 = self.get_hpi_pulse(target)
-                        ps.add(target, x90)
                         ps.add(target, Blank(T))
-                        if second_rotation_axis == "X":
-                            ps.add(target, x90.shifted(np.pi))
-                        else:
-                            ps.add(target, x90.shifted(-np.pi / 2))
                 return ps
 
             detuned_frequencies = {
