@@ -8,8 +8,15 @@ from typing_extensions import TypeAlias
 
 from ..pulse import Pulse
 from .drag import Drag
+from .vert_ramp import VertRamp
 
-RampType: TypeAlias = Literal["Gaussian", "RaisedCosine", "Sintegral", "Bump"]
+RampType: TypeAlias = Literal[
+    "Gaussian",
+    "RaisedCosine",
+    "Sintegral",
+    "Bump",
+    "VertRamp",
+]
 
 
 class FlatTop(Pulse):
@@ -115,26 +122,38 @@ class FlatTop(Pulse):
 
         beta = beta or 0.0
 
-        v_rise = Drag.func(
-            t=t,
-            duration=T,
-            amplitude=amplitude,
-            beta=beta,
-            type=type,
-            drag_coef=drag_coef,
-            sintegral_power=sintegral_power,
-        )
-        v_flat = amplitude * np.ones_like(t)
-        v_fall = Drag.func(
-            t=t - flattime,
-            duration=T,
-            amplitude=amplitude,
-            beta=beta,
-            type=type,
-            drag_coef=drag_coef,
-            sintegral_power=sintegral_power,
-        )
-
+        if type == "VertRamp":
+            v_rise = VertRamp.func(
+                t=t,
+                duration=tau,
+                amplitude=amplitude,
+            )
+            v_flat = amplitude * np.ones_like(t)
+            v_fall = VertRamp.func(
+                t=-(t - duration),
+                duration=tau,
+                amplitude=amplitude,
+            )
+        else:
+            v_rise = Drag.func(
+                t=t,
+                duration=T,
+                amplitude=amplitude,
+                beta=beta,
+                type=type,
+                drag_coef=drag_coef,
+                sintegral_power=sintegral_power,
+            )
+            v_flat = amplitude * np.ones_like(t)
+            v_fall = Drag.func(
+                t=t - flattime,
+                duration=T,
+                amplitude=amplitude,
+                beta=beta,
+                type=type,
+                drag_coef=drag_coef,
+                sintegral_power=sintegral_power,
+            )
         return np.where(
             (t >= 0) & (t <= duration),
             np.where(

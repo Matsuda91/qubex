@@ -2163,3 +2163,70 @@ class CalibrationMixin(
                 continue
 
         return Result(data=data)
+
+    def calibrate_1q_ef(
+        self,
+        targets: Collection[str] | str | None = None,
+        *,
+        shots: int = CALIBRATION_SHOTS,
+        interval: int = DEFAULT_INTERVAL,
+        plot: bool = True,
+    ) -> Result:
+        if targets is None:
+            targets = self.qubit_labels
+        elif isinstance(targets, str):
+            targets = [targets]
+        else:
+            targets = list(targets)
+
+        return_data = {
+            "obtain_ef_rabi_params": {},
+            "calibrate_ef_hpi_pulse": {},
+            "build_classifier": {},
+        }
+
+        for target in targets:
+            try:
+                result = self.obtain_ef_rabi_params(
+                    target,
+                    shots=shots,
+                    interval=interval,
+                    plot=plot,
+                )
+                data = next(iter(result.data.values()))
+                rabi_param = data.rabi_param
+                if rabi_param.r2 < 0.9:
+                    print(f"Warning: R² for {target} is low ({rabi_param.r2:.2f}).")
+                elif rabi_param.r2 < 0.5:
+                    print(f"Error: R² for {target} is very low ({rabi_param.r2:.2f}).")
+                    continue
+                return_data["obtain_ef_rabi_params"][target] = data
+
+                result = self.calibrate_ef_hpi_pulse(
+                    target,
+                    shots=shots,
+                    interval=interval,
+                    plot=plot,
+                )
+                data = next(iter(result.data.values()))
+                return_data["calibrate_ef_hpi_pulse"][target] = data
+
+                self.save_calib_note()
+
+                result = self.build_classifier(
+                    target,
+                    shots=shots * 4,
+                    n_states=3,
+                    interval=interval,
+                    plot=plot,
+                )
+                data = next(iter(result.values()))
+                return_data["build_classifier"][target] = data
+
+                self.save_calib_note()
+
+            except Exception as e:
+                print(f"Error calibrating ef gates for {targets}: {e}")
+                continue
+
+        return Result(data=return_data)

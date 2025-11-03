@@ -169,6 +169,7 @@ class CharacterizationMixin(
         signal = {target: np.array(signal_buf[target]) for target in targets}
         noise = {target: np.array(noise_buf[target]) for target in targets}
         snr = {target: np.array(snr_buf[target]) for target in targets}
+        figs = {}
 
         if plot:
             for target in targets:
@@ -220,12 +221,14 @@ class CharacterizationMixin(
                     width=600,
                     height=400,
                 )
+                figs[target] = fig
 
         return Result(
             data={
                 "signal": signal,
                 "noise": noise,
                 "snr": snr,
+                "fig": figs,
             }
         )
 
@@ -507,6 +510,7 @@ class CharacterizationMixin(
         shots: int = DEFAULT_SHOTS,
         interval: float = DEFAULT_INTERVAL,
         plot: bool = True,
+        verbose: bool = False,
     ) -> ExperimentResult[FreqRabiData]:
         if targets is None:
             targets = self.qubit_labels
@@ -552,7 +556,7 @@ class CharacterizationMixin(
                 )
             else:
                 raise ValueError("Invalid rabi_level.")
-            if plot:
+            if verbose:
                 rabi_result.fit()
             rabi_params = rabi_result.rabi_params
             if rabi_params is None:
@@ -682,7 +686,7 @@ class CharacterizationMixin(
         shots: int = DEFAULT_SHOTS,
         interval: float = DEFAULT_INTERVAL,
         plot: bool = True,
-        verbose: bool = False,
+        verbose: bool = True,
     ) -> Result:
         if targets is None:
             targets = self.qubit_labels
@@ -690,6 +694,13 @@ class CharacterizationMixin(
             targets = [targets]
         else:
             targets = list(targets)
+
+        targets = [
+            target for target in targets if Target.ef_label(target) in self.targets
+        ]
+        if len(targets) == 0:
+            print("No ef targets found for the given targets.")
+            return Result(data={})
 
         if detuning_range is None:
             detuning_range = np.linspace(-0.05, 0.05, 21)
@@ -708,7 +719,8 @@ class CharacterizationMixin(
             time_range=time_range,
             shots=shots,
             interval=interval,
-            plot=plot and verbose,
+            plot=False,
+            verbose=verbose,
         )
 
         if plot:
@@ -785,6 +797,7 @@ class CharacterizationMixin(
         self.params.readout_amplitude = original_readout_amplitudes
 
         fit_data = {}
+        figs = {}
         for target, values in result.items():
             freq = self.resonators[target].frequency
             fit_result = fitting.fit_lorentzian(
@@ -797,6 +810,9 @@ class CharacterizationMixin(
             )
             if "f0" in fit_result:
                 fit_data[target] = fit_result["f0"]
+
+            if "fig" in fit_result:
+                figs[target] = fit_result["fig"]
 
             if save_image:
                 fig = fit_result["fig"]
@@ -812,7 +828,7 @@ class CharacterizationMixin(
         for target, freq in fit_data.items():
             print(f"{target}: {freq:.6f}")
 
-        return Result(data=fit_data)
+        return Result(data={"data": fit_data, "fig": figs})
 
     def t1_experiment(
         self,
@@ -837,7 +853,7 @@ class CharacterizationMixin(
         if time_range is None:
             time_range = np.logspace(
                 np.log10(100),
-                np.log10(100 * 1000),
+                np.log10(200 * 1000),
                 51,
             )
         time_range = self.util.discretize_time_range(np.asarray(time_range))
@@ -933,7 +949,7 @@ class CharacterizationMixin(
         if time_range is None:
             time_range = np.logspace(
                 np.log10(300),
-                np.log10(100 * 1000),
+                np.log10(200 * 1000),
                 51,
             )
         time_range = self.util.discretize_time_range(
@@ -1105,6 +1121,8 @@ class CharacterizationMixin(
                         target=target,
                         times=sweep_data.sweep_range,
                         data=sweep_data.normalized,
+                        amplitude_est=1.0,
+                        offset_est=0.0,
                         plot=plot,
                     )
                     if fit_result["status"] == "success":
@@ -1223,7 +1241,7 @@ class CharacterizationMixin(
         plot: bool = True,
     ) -> Result:
         if time_range is None:
-            time_range = np.arange(0, 10001, 100)
+            time_range = np.arange(0, 20001, 400)
 
         if x90 is None:
             x90 = {
@@ -1277,6 +1295,8 @@ class CharacterizationMixin(
             time_range * 2e-3,
             result.data[target_qubit].normalized,
             is_damped=True,
+            amplitude_est=1.0,
+            offset_est=0.0,
             plot=plot,
             title=f"JAZZ experiment: {target_qubit}-{spectator_qubit}",
             xlabel="Wait time (μs)",
@@ -2932,7 +2952,7 @@ class CharacterizationMixin(
         save_image: bool = True,
     ) -> Result:
         if amplitude_range is None:
-            amplitude_range = np.arange(0.01, 0.21, 0.01)
+            amplitude_range = np.arange(0.01, 0.26, 0.01)
         else:
             amplitude_range = np.array(amplitude_range)
 
@@ -3453,5 +3473,94 @@ class CharacterizationMixin(
             except Exception as e:
                 print(f"Characterization failed for {target}: {e}")
                 continue
+
+        if plot:
+            print()
+            print("T1 (µs):")
+            for target in targets:
+                try:
+                    t1 = data["t1_experiment"][target].t1
+                    print(f"  {target}: {t1 * 1e-3:.6f}")
+                except Exception:
+                    print(f"  {target}: null")
+            print()
+            print("T2 echo (µs):")
+            for target in targets:
+                try:
+                    t2_echo = data["t2_experiment"][target].t2
+                    print(f"  {target}: {t2_echo * 1e-3:.6f}")
+                except Exception:
+                    print(f"  {target}: null")
+            print()
+            print("T2* (µs):")
+            for target in targets:
+                try:
+                    t2_star = data["ramsey_experiment"][target].t2
+                    print(f"  {target}: {t2_star * 1e-3:.6f}")
+                except Exception:
+                    print(f"  {target}: null")
+            print()
+            print("Qubit frequency (GHz):")
+            for target in targets:
+                try:
+                    bare_freq = data["ramsey_experiment"][target].bare_freq
+                    print(f"  {target}: {bare_freq:.6f}")
+                except Exception:
+                    print(f"  {target}: null")
+
+        return Result(data=data)
+
+    def characterize_2q(
+        self,
+        targets: Collection[str] | str | None = None,
+        *,
+        shots: int = CALIBRATION_SHOTS,
+        interval: int = DEFAULT_INTERVAL,
+        plot: bool = True,
+        save_image: bool = True,
+    ) -> Result:
+        if targets is None:
+            targets = self.edge_labels
+        elif isinstance(targets, str):
+            targets = [targets]
+        else:
+            targets = list(targets)
+
+        data = {
+            "obtain_coupling_strength": {},
+        }
+
+        for target in targets:
+            try:
+                pair = target.split("-")
+                result = self.obtain_coupling_strength(
+                    *pair,
+                    shots=shots,
+                    interval=interval,
+                    plot=plot,
+                )
+                data["obtain_coupling_strength"][target] = result.data
+
+            except Exception as e:
+                print(f"Characterization failed for {target}: {e}")
+                continue
+
+        if plot:
+            print()
+            print("Qubit-qubit coupling strength g (MHz):")
+            for target in targets:
+                try:
+                    g = data["obtain_coupling_strength"][target]["g"]
+                    print(f"  {target}: {g * 1e3:.6f}")
+                except Exception:
+                    print(f"  {target}: null")
+            print()
+            print("ZZ coefficient ξ (kHz):")
+            for target in targets:
+                try:
+                    xi = data["obtain_coupling_strength"][target]["xi"]
+                    print(f"  {target}: {xi * 1e6:.6f}")
+                except Exception:
+                    print(f"  {target}: null")
 
         return Result(data=data)
