@@ -930,7 +930,7 @@ class CharacterizationMixin(
         targets: Collection[str] | str | None = None,
         *,
         time_range: ArrayLike | None = None,
-        n_cpmg: int = 1,
+        n_cpmg: int | None = 1,
         pi_cpmg: Waveform | None = None,
         shots: int = DEFAULT_SHOTS,
         interval: float = DEFAULT_INTERVAL,
@@ -952,10 +952,17 @@ class CharacterizationMixin(
                 np.log10(200 * 1000),
                 51,
             )
-        time_range = self.util.discretize_time_range(
-            time_range=np.asarray(time_range),
-            sampling_period=2 * SAMPLING_PERIOD,
-        )
+
+        if n_cpmg is not None:
+            time_range = self.util.discretize_time_range(
+                time_range=np.asarray(time_range),
+                sampling_period=2 * SAMPLING_PERIOD * n_cpmg,
+            )
+        else:
+            time_range = self.util.discretize_time_range(
+                time_range=np.asarray(time_range),
+                sampling_period=2 * SAMPLING_PERIOD,
+            )
 
         data: dict[str, T2Data] = {}
 
@@ -971,23 +978,44 @@ class CharacterizationMixin(
                 with PulseSchedule(subgroup) as ps:
                     for target in subgroup:
                         hpi = self.get_hpi_pulse(target)
-                        pi = pi_cpmg or hpi.repeated(2)
+                        pi = pi_cpmg or hpi.repeated(2).shifted(np.pi / 2)
                         ps.add(target, hpi)
-                        if T > 0:
-                            ps.add(
-                                target,
-                                CPMG(
-                                    tau=(T - pi.duration * n_cpmg) // (2 * n_cpmg),
-                                    pi=pi,
-                                    n=n_cpmg,
-                                ),
+                        if n_cpmg is not None:
+                            total_blank = T - pi.duration * n_cpmg
+                            if total_blank > 0:
+                                tau = total_blank // (2 * n_cpmg)
+                                ps.add(
+                                    target,
+                                    CPMG(
+                                        tau=tau,
+                                        pi=pi,
+                                        n=n_cpmg,
+                                    ),
+                                )
+                            else:
+                                ps.add(target, Blank(T))
+                        else:
+                            tau = pi.duration * 5
+                            cpmg = CPMG(
+                                tau=tau,
+                                pi=pi,
+                                n=2,
                             )
-                        ps.add(target, hpi.shifted(np.pi))
+                            n_repeats = int(T // cpmg.duration)
+                            remainder = T % cpmg.duration
+                            if n_repeats > 0:
+                                ps.add(target, cpmg.repeated(n_repeats))
+                            if remainder > 0:
+                                ps.add(target, Blank(remainder))
+                        ps.add(target, hpi.scaled(-1))
                 return ps
 
             print(
                 f"({idx + 1}/{len(subgroups)}) Conducting T2 experiment for {subgroup}...\n"
             )
+
+            # if plot:
+            #     t2_sequence(time_range[-1]).plot()
 
             sweep_result = self.sweep_parameter(
                 sequence=t2_sequence,
@@ -1001,7 +1029,7 @@ class CharacterizationMixin(
                 fit_result = fitting.fit_exp_decay(
                     target=target,
                     x=sweep_data.sweep_range,
-                    y=0.5 * (1 - sweep_data.normalized),
+                    y=0.5 * (1 + sweep_data.normalized),
                     plot=plot,
                     title="T2 echo",
                     xlabel="Time (μs)",
@@ -1238,6 +1266,7 @@ class CharacterizationMixin(
         second_rotation_axis: Literal["X", "Y"] = "Y",
         shots: int = DEFAULT_SHOTS,
         interval: float = DEFAULT_INTERVAL,
+        rotation_frequency: float = 0.001, 
         plot: bool = True,
     ) -> Result:
         if time_range is None:
@@ -1262,6 +1291,10 @@ class CharacterizationMixin(
                 target_qubit: x180,
                 spectator_qubit: x180,
             }
+        
+        # Raise an error when rotation_frequency is negative
+        if rotation_frequency < 0:
+            raise ValueError("rotation_frequency must be non-negative.")
 
         def jazz_sequence(tau: float) -> PulseSchedule:
             with PulseSchedule([target_qubit, spectator_qubit]) as ps:
@@ -1272,9 +1305,9 @@ class CharacterizationMixin(
                 ps.add(spectator_qubit, x180[spectator_qubit])
                 ps.add(target_qubit, Blank(tau))
                 if second_rotation_axis == "X":
-                    ps.add(target_qubit, x90[target_qubit].shifted(np.pi))
+                    ps.add(target_qubit, x90[target_qubit].shifted(np.pi - rotation_frequency * 2*tau * 2*np.pi)) 
                 else:
-                    ps.add(target_qubit, x90[target_qubit].shifted(-np.pi / 2))
+                    ps.add(target_qubit, x90[target_qubit].shifted(-np.pi / 2 - rotation_frequency * 2*tau * 2*np.pi)) 
             return ps
 
         time_range = np.asarray(time_range)
@@ -1306,7 +1339,7 @@ class CharacterizationMixin(
         if fit_result["status"] != "success":
             raise RuntimeError("Fitting failed in JAZZ experiment.")
 
-        xi = fit_result["f"] * 1e-3
+        xi = fit_result["f"] * 1e-3 - rotation_frequency 
         zeta = 2 * xi
 
         print(f"ξ: {xi * 1e6:.2f} kHz")
@@ -1331,6 +1364,7 @@ class CharacterizationMixin(
         second_rotation_axis: Literal["X", "Y"] = "Y",
         shots: int = CALIBRATION_SHOTS,
         interval: float = DEFAULT_INTERVAL,
+        rotation_frequency: float = 0.001,
         plot: bool = True,
     ) -> Result:
         qubit_1 = target_qubit
@@ -1345,6 +1379,7 @@ class CharacterizationMixin(
             second_rotation_axis=second_rotation_axis,
             shots=shots,
             interval=interval,
+            rotation_frequency=rotation_frequency,
             plot=plot,
         )
 
@@ -1361,8 +1396,8 @@ class CharacterizationMixin(
 
         g = np.sqrt(np.abs((xi * (Delta_12 + a_1) * (Delta_12 - a_2)) / (a_1 + a_2)))
 
-        print(f"frequency_1: {f_1:.2f} GHz")
-        print(f"frequency_2: {f_2:.2f} GHz")
+        print(f"frequency_1: {f_1:.5f} GHz")
+        print(f"frequency_2: {f_2:.5f} GHz")
         print(f"Delta_12: {Delta_12 * 1e3:.2f} MHz")
         print(f"anharmonicity_1: {a_1 * 1e3:.2f} MHz")
         print(f"anharmonicity_2: {a_2 * 1e3:.2f} MHz")
@@ -1375,6 +1410,7 @@ class CharacterizationMixin(
                 "g": g,
             }
         )
+
 
     @deprecated("Use `measure_electrical_delay` instead.")
     def measure_phase_shift(
@@ -2855,7 +2891,7 @@ class CharacterizationMixin(
         save_image: bool = True,
     ) -> Result:
         if df is None:
-            df = 0.0002
+            df = 0.0004
         if frequency_width is None:
             frequency_width = 0.02
         result_0 = self.measure_reflection_coefficient(
