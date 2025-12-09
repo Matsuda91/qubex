@@ -536,6 +536,7 @@ class CalibrationProtocol(Protocol):
         shots: int = DEFAULT_SHOTS,
         interval: float = DEFAULT_INTERVAL,
         reset_awg_and_capunits: bool = True,
+        monitor_spectators: bool = False,
         plot: bool = True,
     ) -> dict: ...
 
@@ -555,6 +556,7 @@ class CalibrationProtocol(Protocol):
         shots: int = CALIBRATION_SHOTS,
         interval: float = DEFAULT_INTERVAL,
         reset_awg_and_capunits: bool = True,
+        monitor_spectators: bool = False,
         plot: bool = True,
     ) -> dict: ...
 
