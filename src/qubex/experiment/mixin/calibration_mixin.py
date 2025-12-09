@@ -1707,6 +1707,58 @@ class CalibrationMixin(
 
             print(f"Estimated ZX90 gate length : {zx90_duration:.1f} ns")
 
+            if monitor_spectator_qubits:
+                for idx, label in enumerate(spectators_fit_results_0.keys()):
+                    f_s = self.qubits[label].frequency
+                    print("")
+                    print("Spectator qubit ")
+                    print(f"  ω_s ({label}) : {f_s * 1e3:.3f} MHz")
+                    print(f"  Δ_st ({label}-{target_qubit}) : {(f_s - f_target) * 1e3:.3f} MHz")
+                    
+                    raw_Omega_0 = spectators_fit_results_0[label]["Omega"]
+                    raw_Omega_1 = spectators_fit_results_1[label]["Omega"]
+                    raw_Omega = np.concatenate(
+                        [
+                            0.5 * (raw_Omega_0 + raw_Omega_1),
+                            0.5 * (raw_Omega_0 - raw_Omega_1),
+                        ]
+                    )
+                    compensated_Omega_0 = spectators_compensated_fit_results_0[label]["Omega"]
+                    compensated_Omega_1 = spectators_compensated_fit_results_1[label]["Omega"]
+                    compensated_Omega = np.concatenate(
+                        [
+                            0.5 * (compensated_Omega_0 + compensated_Omega_1),
+                            0.5 * (compensated_Omega_0 - compensated_Omega_1),
+                        ]
+                    )
+                    raw_coeffs = dict(
+                        zip(
+                            ["IX", "IY", "IZ", "ZX", "ZY", "ZZ"],
+                            raw_Omega / (2 * np.pi),  # GHz
+                        )
+                    )
+                    compensated_coeffs = dict(
+                        zip(
+                            ["IX", "IY", "IZ", "ZX", "ZY", "ZZ"],
+                            compensated_Omega / (2 * np.pi),  # GHz
+                        )
+                    )
+                    print("")
+                    for key, value in raw_coeffs.items():
+                        print(
+                            f"  {key} : {value * 1e3:+.4f} MHz (raw)"
+                        )
+                    print(f"  r2 (raw: control |0〉): {spectators_fit_results_0[label]['r2']}")
+                    print(f"  r2 (raw: control |1〉): {spectators_fit_results_1[label]['r2']}")
+                    print("")
+                    for key, value in compensated_coeffs.items():
+                        print(
+                            f"  {key} : {value * 1e3:+.4f} MHz (compensated)"
+                        )
+                    print(f"  r2 (compensated: control |0〉): {spectators_compensated_fit_results_0[label]['r2']:.3f}")
+                    print(f"  r2 (compensated: control |1〉): {spectators_compensated_fit_results_1[label]['r2']:.3f}")
+                print("")
+
         return Result(
             data={
                 "Omega": Omega,
