@@ -904,6 +904,7 @@ class CalibrationMixin(
         shots: int = DEFAULT_SHOTS,
         interval: float = DEFAULT_INTERVAL,
         reset_awg_and_capunits: bool = True,
+        monitor_spectator_qubits: bool = False,
         plot: bool = True,
     ) -> Result:
         cr_label = f"{control_qubit}-{target_qubit}"
@@ -936,23 +937,49 @@ class CalibrationMixin(
         if reset_awg_and_capunits:
             self.reset_awg_and_capunits(qubits=[control_qubit, target_qubit])
 
+        if monitor_spectator_qubits:
+            spectators = self.get_spectators(control_qubit)
+            spectator_qubits = [
+                spectator.label
+                for spectator in spectators
+                if (spectator.label in self.qubit_labels) and (spectator.label != target_qubit)
+            ]
+            x90.update({
+                spectator: self.x90(spectator)
+                for spectator in spectator_qubits
+            })
+        else:
+            spectator_qubits = []
+        
+        def cr_sequence(targets:list[str], T:float) -> PulseSchedule:
+            cr = CrossResonance(
+                control_qubit=control_qubit,
+                target_qubit=target_qubit,
+                cr_amplitude=cr_amplitude,
+                cr_duration=T + ramptime * 2,
+                cr_ramptime=ramptime,
+                cr_phase=cr_phase,
+                cancel_amplitude=cancel_amplitude,
+                cancel_phase=cancel_phase,
+                echo=echo,
+                pi_pulse=x180[control_qubit],
+                pi_margin=x180_margin,
+                ramp_type=ramp_type,
+            )
+            with PulseSchedule(targets) as ps: 
+                ps.call(cr)
+            
+            return ps
+                    
+
         control_states = []
         target_states = []
+        spectators_states = defaultdict(list)
         for T in time_range:
             result = self.state_tomography(
-                CrossResonance(
-                    control_qubit=control_qubit,
-                    target_qubit=target_qubit,
-                    cr_amplitude=cr_amplitude,
-                    cr_duration=T + ramptime * 2,
-                    cr_ramptime=ramptime,
-                    cr_phase=cr_phase,
-                    cancel_amplitude=cancel_amplitude,
-                    cancel_phase=cancel_phase,
-                    echo=echo,
-                    pi_pulse=x180[control_qubit],
-                    pi_margin=x180_margin,
-                    ramp_type=ramp_type,
+                sequence=cr_sequence(
+                    targets=[control_qubit, target_qubit] + spectator_qubits,
+                    T=T,
                 ),
                 x90=x90,
                 initial_state={control_qubit: control_state},
@@ -963,9 +990,15 @@ class CalibrationMixin(
             )
             control_states.append(np.array(result[control_qubit]))
             target_states.append(np.array(result[target_qubit]))
+            for spectator in spectator_qubits:
+                spectators_states[spectator].append(np.array(result[spectator]))
 
         control_states = np.array(control_states)
         target_states = np.array(target_states)
+        spectators_states = {
+            spectator: np.array(states) 
+            for spectator, states in spectators_states.items()
+        }
 
         effective_drive_range = time_range + ramptime
 
@@ -977,6 +1010,87 @@ class CalibrationMixin(
             xlabel="Drive time (ns)",
             ylabel=f"Target qubit : {target_qubit}",
         )
+
+        if monitor_spectator_qubits:
+            G_x = np.array([[0, 0, 0], [0, 0, -1], [0, 1, 0]])
+            G_y = np.array([[0, 0, 1], [0, 0, 0], [-1, 0, 0]])
+            G_z = np.array([[0, -1, 0], [1, 0, 0], [0, 0, 0]])
+
+            def rotation_matrix(
+                t: float,
+                omega: float,
+                n: tuple[float, float, float],
+            ) -> NDArray[np.float64]:
+                G = n[0] * G_x + n[1] * G_y + n[2] * G_z
+                return np.eye(3) + np.sin(omega * t) * G + (1 - np.cos(omega * t)) * G @ G
+
+            def z_rotate(
+                t: np.float64,
+                omega: float,
+                x0: float,
+                y0: float,
+                z0: float,
+            ) -> NDArray[np.float64]:
+                """
+                Simulate the rotation of a state vector.
+
+                Parameters
+                ----------
+                times : NDArray[np.float64]
+                    Time points for the rotation.
+                omega : float
+                    Rotation frequency.
+                theta : float
+                    Polar angle of the rotation axis.
+                phi : float
+                    Azimuthal angle of the rotation axis.
+                alpha : float
+                    Decay rate.
+                """
+                r0 = np.array([x0, y0, z0])
+                n_x = 0
+                n_y = 0
+                n_z = 1
+                n = (n_x, n_y, n_z)
+                return rotation_matrix(t, omega, n) @ r0
+                
+            spectators_fit_result = {}
+            spectators_compensated_fit_result = {}
+            for label, states in spectators_states.items():
+                omega_ts = 2*np.pi*(self.qubits[target_qubit].frequency - self.qubits[label].frequency)
+                z_rotated_states = np.array(
+                    [
+                        z_rotate(
+                            t=t,
+                            omega=omega_ts,
+                            x0=x0,
+                            y0=y0,
+                            z0=z0,
+                        )
+                        for (t, (x0, y0, z0)) in zip(effective_drive_range, states)
+                    ]
+                )
+
+                spectators_fit_result[label] = fitting.fit_rotation(
+                    effective_drive_range,
+                    states,
+                    plot=False,
+                    title=f"Spectator qubit dynamics (raw) of {cr_label} : |{control_state}〉",
+                    xlabel="Drive time (ns)",
+                    ylabel=f"Spectator qubit : {label}",
+                )
+                
+                spectators_compensated_fit_result[label] = fitting.fit_rotation(
+                        effective_drive_range,
+                        z_rotated_states,
+                        plot=False,
+                        title=f"Spectator qubit dynamics (compensated) of {cr_label} : |{control_state}〉",
+                        xlabel="Drive time (ns)",
+                        ylabel=f"Spectator qubit : {label}",
+                    )
+        else:
+            spectators_fit_result = {}
+            spectators_compensated_fit_result = {}
 
         if plot:
             viz.plot_bloch_vectors(
@@ -992,13 +1106,27 @@ class CalibrationMixin(
             fit_result["fig3d"].show()
             viz.display_bloch_sphere(target_states)
 
+            for label,fit in spectators_fit_result.items():
+                fit["fig"].show()
+                fit["fig3d"].show()
+                viz.display_bloch_sphere(spectators_states[label])
+
+            for label,fit in spectators_compensated_fit_result.items():
+                fit["fig"].show()
+                fit["fig3d"].show()
+
         return Result(
             data={
                 "time_range": time_range,
                 "effective_drive_range": effective_drive_range,
                 "control_states": control_states,
                 "target_states": target_states,
+                "spectators_states": spectators_states,
                 "fit_result": fit_result,
+                "spectators_fit_result": {
+                    "raw": spectators_fit_result,
+                    "compensated": spectators_compensated_fit_result,
+                },
                 "cr_amplitude": cr_amplitude,
                 "ramptime": ramptime,
             }
@@ -1043,6 +1171,7 @@ class CalibrationMixin(
         shots: int = CALIBRATION_SHOTS,
         interval: float = DEFAULT_INTERVAL,
         reset_awg_and_capunits: bool = True,
+        monitor_spectator_qubits: bool = False,
         plot: bool = True,
     ) -> Result:
         cr_label = f"{control_qubit}-{target_qubit}"
@@ -1073,6 +1202,7 @@ class CalibrationMixin(
             shots=shots,
             interval=interval,
             reset_awg_and_capunits=False,
+            monitor_spectator_qubits=monitor_spectator_qubits,
             plot=False,
         )
 
@@ -1093,6 +1223,7 @@ class CalibrationMixin(
             shots=shots,
             interval=interval,
             reset_awg_and_capunits=False,
+            monitor_spectator_qubits=monitor_spectator_qubits,
             plot=False,
         )
 
@@ -1326,11 +1457,225 @@ class CalibrationMixin(
             showlegend=False,
             margin=dict(t=90, b=10, l=10, r=10),
         )
+        
+        spectators_fit_results_0 = result_0["spectators_fit_result"]["raw"]
+        spectators_fit_results_1 = result_1["spectators_fit_result"]["raw"]
+        spectators_compensated_fit_results_0 = result_0["spectators_fit_result"]["compensated"]
+        spectators_compensated_fit_results_1 = result_1["spectators_fit_result"]["compensated"]
+        figs_s = {}
+        figs_s_3d = {}
+        for label in spectators_fit_results_0.keys():
+            f_delta_st = self.qubits[label].frequency - self.qubits[target_qubit].frequency
+            
+            fig_s_0: go.Figure = spectators_fit_results_0[label]["fig"]
+            fig_s_1: go.Figure = spectators_fit_results_1[label]["fig"]
+            fig_s_compensated_0: go.Figure = spectators_compensated_fit_results_0[label]["fig"]
+            fig_s_compensated_1: go.Figure = spectators_compensated_fit_results_1[label]["fig"]
+
+            fig_s = make_subplots(
+            rows=2,
+            cols=2,      
+            shared_xaxes=True,
+            vertical_spacing=0.1,
+            )
+
+            for data in fig_s_0.data:
+                data: go.Scatter
+                fig_s.add_trace(
+                    go.Scatter(
+                        x=data.x,
+                        y=data.y,
+                        mode=data.mode,
+                        line=data.line,
+                        marker=data.marker,
+                        name=data.name,
+                        showlegend=True,
+                    ),
+                    row=1,
+                    col=1,
+                )
+            for data in fig_s_compensated_0.data:
+                data: go.Scatter
+                fig_s.add_trace(
+                    go.Scatter(
+                        x=data.x,
+                        y=data.y,
+                        mode=data.mode,
+                        line=data.line,
+                        marker=data.marker,
+                        name=data.name,
+                        showlegend=False,
+                    ),
+                    row=1,
+                    col=2,
+                )
+            
+            for data in fig_s_1.data:
+                data: go.Scatter
+                fig_s.add_trace(
+                    go.Scatter(
+                        x=data.x,
+                        y=data.y,
+                        mode=data.mode,
+                        line=data.line,
+                        marker=data.marker,
+                        name=data.name,
+                        showlegend=False,
+                    ),
+                    row=2,
+                    col=1,
+                )
+
+            for data in fig_s_compensated_1.data:
+                data: go.Scatter
+                fig_s.add_trace(
+                    go.Scatter(
+                        x=data.x,
+                        y=data.y,
+                        mode=data.mode,
+                        line=data.line,
+                        marker=data.marker,
+                        name=data.name,
+                        showlegend=False,
+                    ),
+                    row=2,
+                    col=2,
+                )
+            fig_s.update_xaxes(
+                title_text="Drive time (ns)",
+                row=2,
+                col=1,
+            )
+            fig_s.update_xaxes(
+                title_text="Drive time (ns)",
+                row=2,
+                col=2,
+            )
+            fig_s.update_yaxes(
+                title_text="control : |0〉",
+                range=[-1.1, 1.1],
+                row=1,
+                col=1,
+            )
+            fig_s.update_yaxes(
+                title_text="control : |1〉",
+                range=[-1.1, 1.1],
+                row=2,
+                col=1,
+            )
+            fig_s.update_layout(
+                title=dict(
+                    text=f"Spectator qubit dynamics : {label} of {cr_label}",
+                    subtitle=dict(
+                        text=f"Δ = {f_delta_st * 1e3:.0f} MHz , Ω = {cr_rabi_rate * 1e3:.1f} MHz , τ = {ramptime:.0f} ns, left: raw , right: compensated"
+                    ),
+                ),
+                height=400,
+                width=800,
+                showlegend=True,
+                margin=dict(t=90),
+            )
+
+            fig_s_3d_0 = spectators_fit_results_0[label]["fig3d"]
+            fig_s_3d_1 = spectators_fit_results_1[label]["fig3d"]
+            fig_s_3d_0_compensated = spectators_compensated_fit_results_0[label]["fig3d"]
+            fig_s_3d_1_compensated = spectators_compensated_fit_results_1[label]["fig3d"]
+            fig_s_3d = make_subplots(
+                rows=1,
+                cols=2,
+                subplot_titles=[
+                    "Control |0〉",  
+                    "Control |1〉",
+                ],
+                specs=[[{"type": "scatter3d"}, {"type": "scatter3d"}]],
+                horizontal_spacing=0.01,
+            )
+
+            def add_trace_with_color(
+                fig: go.Figure,
+                incoming_fig: go.Figure,
+                row: int,
+                col: int,
+                offset: int = 0,
+                name:str|None=None,
+            ) -> None:
+                for ddx, data in enumerate(incoming_fig.data):
+                    if ddx%2==0:
+                        name_suffix = "data"
+                    else:
+                        name_suffix = "fit"
+                    fig.add_trace(
+                        data,
+                        row=row,
+                        col=col,
+                    )
+                    if not isinstance(data, go.Surface):
+                        if data.mode == "markers":
+                            fig.data[-1].marker.color = viz.COLORS[ddx+offset]
+                        if data.mode == "lines":
+                            fig.data[-1].line.color = viz.COLORS[ddx+offset]
+                        if name is not None:
+                            fig.data[-1].name = f"{name_suffix} ({name})"
+                            fig.data[-1].showlegend = True
+                
+
+            add_trace_with_color(
+                fig = fig_s_3d,
+                incoming_fig = fig_s_3d_0,
+                row = 1,
+                col = 1,
+                offset = 0,
+            )
+            add_trace_with_color(
+                fig = fig_s_3d,
+                incoming_fig = fig_s_3d_0_compensated,
+                row = 1,
+                col = 1,
+                offset = 2,
+            )
+            add_trace_with_color(
+                fig = fig_s_3d,
+                incoming_fig = fig_s_3d_1,
+                row = 1,
+                col = 2,
+                offset = 0,
+                name="raw",
+            )
+            add_trace_with_color(
+                fig = fig_s_3d,
+                incoming_fig = fig_s_3d_1_compensated,
+                row = 1,
+                col = 2,
+                offset = 2,
+                name="compensated",
+            )
+            
+            
+            fig_s_3d.update_layout(
+                title=dict(
+                    text=f"Spectator qubit dynamics : {label} of {cr_label}",
+                    subtitle=dict(
+                        text=f"Δ = {f_delta_st * 1e3:.0f} MHz , Ω = {cr_rabi_rate * 1e3:.1f} MHz , τ = {ramptime:.0f} ns"
+                    ),
+                ),
+                height=400,
+                width=600,
+                showlegend=False,
+                margin=dict(t=90, b=10, l=10, r=10),
+            )
+
+            figs_s[label] = fig_s
+            figs_s_3d[label] = fig_s_3d
+
 
         if plot:
             fig_c.show()
             fig_t.show()
             fig_t_3d.show()
+            for _, fig_s_ in figs_s.items():
+                fig_s_.show()
+            for _, fig_s_3d in figs_s_3d.items():
+                fig_s_3d.show()
 
             print("Qubit frequencies:")
             print(f"  ω_c ({control_qubit}) : {f_control * 1e3:.3f} MHz")
@@ -1379,6 +1724,7 @@ class CalibrationMixin(
                 "result_1": result_1,
                 "fig_c": fig_c,
                 "fig_t": fig_t,
+                "figs_s": figs_s,
             }
         )
 
