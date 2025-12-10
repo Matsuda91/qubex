@@ -905,6 +905,7 @@ class CalibrationMixin(
         interval: float = DEFAULT_INTERVAL,
         reset_awg_and_capunits: bool = True,
         monitor_spectator_qubits: bool = False,
+        spectator_state:Literal["0", "+"] | None = None,
         plot: bool = True,
     ) -> Result:
         cr_label = f"{control_qubit}-{target_qubit}"
@@ -951,6 +952,17 @@ class CalibrationMixin(
         else:
             spectator_qubits = []
         
+        if spectator_state is None:
+            initial_state = {
+                control_qubit: control_state,
+            }
+        else:
+            initial_state = {
+                control_qubit: control_state,
+            }
+            for spectator in spectator_qubits:
+                initial_state[spectator] = spectator_state
+        
         def cr_sequence(targets:list[str], T:float) -> PulseSchedule:
             cr = CrossResonance(
                 control_qubit=control_qubit,
@@ -982,7 +994,7 @@ class CalibrationMixin(
                     T=T,
                 ),
                 x90=x90,
-                initial_state={control_qubit: control_state},
+                initial_state=initial_state,
                 shots=shots,
                 interval=interval,
                 reset_awg_and_capunits=False,
@@ -1172,6 +1184,7 @@ class CalibrationMixin(
         interval: float = DEFAULT_INTERVAL,
         reset_awg_and_capunits: bool = True,
         monitor_spectator_qubits: bool = False,
+        spectator_state:Literal["0", "+"] | None = None,
         plot: bool = True,
     ) -> Result:
         cr_label = f"{control_qubit}-{target_qubit}"
@@ -1203,6 +1216,7 @@ class CalibrationMixin(
             interval=interval,
             reset_awg_and_capunits=False,
             monitor_spectator_qubits=monitor_spectator_qubits,
+            spectator_state=spectator_state,
             plot=False,
         )
 
@@ -1224,6 +1238,7 @@ class CalibrationMixin(
             interval=interval,
             reset_awg_and_capunits=False,
             monitor_spectator_qubits=monitor_spectator_qubits,
+            spectator_state=spectator_state,
             plot=False,
         )
 
