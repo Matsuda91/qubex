@@ -905,7 +905,6 @@ class CalibrationMixin(
         interval: float = DEFAULT_INTERVAL,
         reset_awg_and_capunits: bool = True,
         monitor_spectator_qubits: bool = False,
-        spectator_state:Literal["0", "+"] | None = None,
         plot: bool = True,
     ) -> Result:
         cr_label = f"{control_qubit}-{target_qubit}"
@@ -930,13 +929,31 @@ class CalibrationMixin(
                 control_qubit: self.x90(control_qubit),
                 target_qubit: self.x90(target_qubit),
             }
+            if monitor_spectator_qubits:
+                spectators = self.get_spectators(control_qubit)
+                for spectator in spectators:
+                    if spectator.label in self.qubit_labels and spectator.label != target_qubit:
+                        x90[spectator.label] = self.x90(spectator.label)
+
         if x180 is None:
             x180 = {
                 control_qubit: self.x180(control_qubit),
             }
 
         if reset_awg_and_capunits:
-            self.reset_awg_and_capunits(qubits=[control_qubit, target_qubit])
+            if monitor_spectator_qubits:
+                spectators = self.get_spectators(control_qubit)
+                spectator_qubits = [
+                    spectator.label
+                    for spectator in spectators
+                    if (spectator.label in self.qubit_labels) and (spectator.label != target_qubit)
+                ]
+                self.reset_awg_and_capunits(
+                    qubits=[control_qubit, target_qubit] + spectator_qubits
+                )
+            else:
+                self.reset_awg_and_capunits(qubits=[control_qubit, target_qubit])
+
 
         if monitor_spectator_qubits:
             spectators = self.get_spectators(control_qubit)
@@ -945,23 +962,12 @@ class CalibrationMixin(
                 for spectator in spectators
                 if (spectator.label in self.qubit_labels) and (spectator.label != target_qubit)
             ]
-            x90.update({
-                spectator: self.x90(spectator)
-                for spectator in spectator_qubits
-            })
+            frequencies = {label: self.targets[cr_label].frequency for label in spectator_qubits}
         else:
             spectator_qubits = []
+            frequencies = {}
         
-        if spectator_state is None:
-            initial_state = {
-                control_qubit: control_state,
-            }
-        else:
-            initial_state = {
-                control_qubit: control_state,
-            }
-            for spectator in spectator_qubits:
-                initial_state[spectator] = spectator_state
+        initial_state = {control_qubit: control_state}
         
         def cr_sequence(targets:list[str], T:float) -> PulseSchedule:
             cr = CrossResonance(
@@ -987,23 +993,25 @@ class CalibrationMixin(
         control_states = []
         target_states = []
         spectators_states = defaultdict(list)
-        for T in time_range:
-            result = self.state_tomography(
-                sequence=cr_sequence(
-                    targets=[control_qubit, target_qubit] + spectator_qubits,
-                    T=T,
-                ),
-                x90=x90,
-                initial_state=initial_state,
-                shots=shots,
-                interval=interval,
-                reset_awg_and_capunits=False,
-                plot=False,
-            )
-            control_states.append(np.array(result[control_qubit]))
-            target_states.append(np.array(result[target_qubit]))
-            for spectator in spectator_qubits:
-                spectators_states[spectator].append(np.array(result[spectator]))
+                
+        with self.modified_frequencies(frequencies):    
+            for T in time_range:
+                result = self.state_tomography(
+                    sequence=cr_sequence(
+                        targets=[control_qubit, target_qubit] + spectator_qubits,
+                        T=T,
+                    ),
+                    x90=x90,
+                    initial_state=initial_state,
+                    shots=shots,
+                    interval=interval,
+                    reset_awg_and_capunits=False,
+                    plot=False,
+                )
+                control_states.append(np.array(result[control_qubit]))
+                target_states.append(np.array(result[target_qubit]))
+                for spectator in spectator_qubits:
+                    spectators_states[spectator].append(np.array(result[spectator]))
 
         control_states = np.array(control_states)
         target_states = np.array(target_states)
@@ -1024,64 +1032,9 @@ class CalibrationMixin(
         )
 
         if monitor_spectator_qubits:
-            G_x = np.array([[0, 0, 0], [0, 0, -1], [0, 1, 0]])
-            G_y = np.array([[0, 0, 1], [0, 0, 0], [-1, 0, 0]])
-            G_z = np.array([[0, -1, 0], [1, 0, 0], [0, 0, 0]])
-
-            def rotation_matrix(
-                t: float,
-                omega: float,
-                n: tuple[float, float, float],
-            ) -> NDArray[np.float64]:
-                G = n[0] * G_x + n[1] * G_y + n[2] * G_z
-                return np.eye(3) + np.sin(omega * t) * G + (1 - np.cos(omega * t)) * G @ G
-
-            def z_rotate(
-                t: np.float64,
-                omega: float,
-                x0: float,
-                y0: float,
-                z0: float,
-            ) -> NDArray[np.float64]:
-                """
-                Simulate the rotation of a state vector.
-
-                Parameters
-                ----------
-                times : NDArray[np.float64]
-                    Time points for the rotation.
-                omega : float
-                    Rotation frequency.
-                theta : float
-                    Polar angle of the rotation axis.
-                phi : float
-                    Azimuthal angle of the rotation axis.
-                alpha : float
-                    Decay rate.
-                """
-                r0 = np.array([x0, y0, z0])
-                n_x = 0
-                n_y = 0
-                n_z = 1
-                n = (n_x, n_y, n_z)
-                return rotation_matrix(t, omega, n) @ r0
                 
             spectators_fit_result = {}
-            spectators_compensated_fit_result = {}
             for label, states in spectators_states.items():
-                omega_ts = 2*np.pi*(self.qubits[target_qubit].frequency - self.qubits[label].frequency)
-                z_rotated_states = np.array(
-                    [
-                        z_rotate(
-                            t=t,
-                            omega=omega_ts,
-                            x0=x0,
-                            y0=y0,
-                            z0=z0,
-                        )
-                        for (t, (x0, y0, z0)) in zip(effective_drive_range, states)
-                    ]
-                )
 
                 spectators_fit_result[label] = fitting.fit_rotation(
                     effective_drive_range,
@@ -1092,18 +1045,9 @@ class CalibrationMixin(
                     ylabel=f"Spectator qubit : {label}",
                 )
                 
-                spectators_compensated_fit_result[label] = fitting.fit_rotation(
-                        effective_drive_range,
-                        z_rotated_states,
-                        plot=False,
-                        title=f"Spectator qubit dynamics (compensated) of {cr_label} : |{control_state}〉",
-                        xlabel="Drive time (ns)",
-                        ylabel=f"Spectator qubit : {label}",
-                    )
         else:
             spectators_fit_result = {}
-            spectators_compensated_fit_result = {}
-
+            
         if plot:
             viz.plot_bloch_vectors(
                 effective_drive_range,
@@ -1123,9 +1067,6 @@ class CalibrationMixin(
                 fit["fig3d"].show()
                 viz.display_bloch_sphere(spectators_states[label])
 
-            for label,fit in spectators_compensated_fit_result.items():
-                fit["fig"].show()
-                fit["fig3d"].show()
 
         return Result(
             data={
@@ -1135,10 +1076,7 @@ class CalibrationMixin(
                 "target_states": target_states,
                 "spectators_states": spectators_states,
                 "fit_result": fit_result,
-                "spectators_fit_result": {
-                    "raw": spectators_fit_result,
-                    "compensated": spectators_compensated_fit_result,
-                },
+                "spectators_fit_result": spectators_fit_result,
                 "cr_amplitude": cr_amplitude,
                 "ramptime": ramptime,
             }
@@ -1184,7 +1122,6 @@ class CalibrationMixin(
         interval: float = DEFAULT_INTERVAL,
         reset_awg_and_capunits: bool = True,
         monitor_spectator_qubits: bool = False,
-        spectator_state:Literal["0", "+"] | None = None,
         plot: bool = True,
     ) -> Result:
         cr_label = f"{control_qubit}-{target_qubit}"
@@ -1216,7 +1153,6 @@ class CalibrationMixin(
             interval=interval,
             reset_awg_and_capunits=False,
             monitor_spectator_qubits=monitor_spectator_qubits,
-            spectator_state=spectator_state,
             plot=False,
         )
 
@@ -1238,7 +1174,6 @@ class CalibrationMixin(
             interval=interval,
             reset_awg_and_capunits=False,
             monitor_spectator_qubits=monitor_spectator_qubits,
-            spectator_state=spectator_state,
             plot=False,
         )
 
@@ -1473,23 +1408,20 @@ class CalibrationMixin(
             margin=dict(t=90, b=10, l=10, r=10),
         )
         
-        spectators_fit_results_0 = result_0["spectators_fit_result"]["raw"]
-        spectators_fit_results_1 = result_1["spectators_fit_result"]["raw"]
-        spectators_compensated_fit_results_0 = result_0["spectators_fit_result"]["compensated"]
-        spectators_compensated_fit_results_1 = result_1["spectators_fit_result"]["compensated"]
+        spectators_fit_results_0 = result_0["spectators_fit_result"]
+        spectators_fit_results_1 = result_1["spectators_fit_result"]
         figs_s = {}
         figs_s_3d = {}
         for label in spectators_fit_results_0.keys():
+            f_delta = self.qubits[control_qubit].frequency - self.qubits[target_qubit].frequency
             f_delta_st = self.qubits[label].frequency - self.qubits[target_qubit].frequency
             
             fig_s_0: go.Figure = spectators_fit_results_0[label]["fig"]
             fig_s_1: go.Figure = spectators_fit_results_1[label]["fig"]
-            fig_s_compensated_0: go.Figure = spectators_compensated_fit_results_0[label]["fig"]
-            fig_s_compensated_1: go.Figure = spectators_compensated_fit_results_1[label]["fig"]
 
             fig_s = make_subplots(
             rows=2,
-            cols=2,      
+            cols=1,      
             shared_xaxes=True,
             vertical_spacing=0.1,
             )
@@ -1509,21 +1441,6 @@ class CalibrationMixin(
                     row=1,
                     col=1,
                 )
-            for data in fig_s_compensated_0.data:
-                data: go.Scatter
-                fig_s.add_trace(
-                    go.Scatter(
-                        x=data.x,
-                        y=data.y,
-                        mode=data.mode,
-                        line=data.line,
-                        marker=data.marker,
-                        name=data.name,
-                        showlegend=False,
-                    ),
-                    row=1,
-                    col=2,
-                )
             
             for data in fig_s_1.data:
                 data: go.Scatter
@@ -1541,31 +1458,12 @@ class CalibrationMixin(
                     col=1,
                 )
 
-            for data in fig_s_compensated_1.data:
-                data: go.Scatter
-                fig_s.add_trace(
-                    go.Scatter(
-                        x=data.x,
-                        y=data.y,
-                        mode=data.mode,
-                        line=data.line,
-                        marker=data.marker,
-                        name=data.name,
-                        showlegend=False,
-                    ),
-                    row=2,
-                    col=2,
-                )
             fig_s.update_xaxes(
                 title_text="Drive time (ns)",
                 row=2,
                 col=1,
             )
-            fig_s.update_xaxes(
-                title_text="Drive time (ns)",
-                row=2,
-                col=2,
-            )
+
             fig_s.update_yaxes(
                 title_text="control : |0〉",
                 range=[-1.1, 1.1],
@@ -1580,9 +1478,9 @@ class CalibrationMixin(
             )
             fig_s.update_layout(
                 title=dict(
-                    text=f"Spectator qubit dynamics : {label} of {cr_label}",
+                    text=f"Spectator qubit dynamics : {label} in {cr_label}",
                     subtitle=dict(
-                        text=f"Δ = {f_delta_st * 1e3:.0f} MHz , Ω = {cr_rabi_rate * 1e3:.1f} MHz , τ = {ramptime:.0f} ns, left: raw , right: compensated"
+                        text=f"Δ = {f_delta * 1e3:.0f} MHz ,Δ_st = {f_delta_st * 1e3:.0f} MHz  Ω = {cr_rabi_rate * 1e3:.1f} MHz , τ = {ramptime:.0f} ns"
                     ),
                 ),
                 height=400,
@@ -1593,8 +1491,7 @@ class CalibrationMixin(
 
             fig_s_3d_0 = spectators_fit_results_0[label]["fig3d"]
             fig_s_3d_1 = spectators_fit_results_1[label]["fig3d"]
-            fig_s_3d_0_compensated = spectators_compensated_fit_results_0[label]["fig3d"]
-            fig_s_3d_1_compensated = spectators_compensated_fit_results_1[label]["fig3d"]
+
             fig_s_3d = make_subplots(
                 rows=1,
                 cols=2,
@@ -1611,7 +1508,6 @@ class CalibrationMixin(
                 incoming_fig: go.Figure,
                 row: int,
                 col: int,
-                offset: int = 0,
                 name:str|None=None,
             ) -> None:
                 for ddx, data in enumerate(incoming_fig.data):
@@ -1626,9 +1522,9 @@ class CalibrationMixin(
                     )
                     if not isinstance(data, go.Surface):
                         if data.mode == "markers":
-                            fig.data[-1].marker.color = viz.COLORS[ddx+offset]
+                            fig.data[-1].marker.color = viz.COLORS[ddx]
                         if data.mode == "lines":
-                            fig.data[-1].line.color = viz.COLORS[ddx+offset]
+                            fig.data[-1].line.color = viz.COLORS[ddx]
                         if name is not None:
                             fig.data[-1].name = f"{name_suffix} ({name})"
                             fig.data[-1].showlegend = True
@@ -1639,31 +1535,17 @@ class CalibrationMixin(
                 incoming_fig = fig_s_3d_0,
                 row = 1,
                 col = 1,
-                offset = 0,
             )
-            add_trace_with_color(
-                fig = fig_s_3d,
-                incoming_fig = fig_s_3d_0_compensated,
-                row = 1,
-                col = 1,
-                offset = 2,
-            )
+
             add_trace_with_color(
                 fig = fig_s_3d,
                 incoming_fig = fig_s_3d_1,
                 row = 1,
                 col = 2,
-                offset = 0,
                 name="raw",
             )
-            add_trace_with_color(
-                fig = fig_s_3d,
-                incoming_fig = fig_s_3d_1_compensated,
-                row = 1,
-                col = 2,
-                offset = 2,
-                name="compensated",
-            )
+
+
             
             
             fig_s_3d.update_layout(
@@ -1723,7 +1605,7 @@ class CalibrationMixin(
             print(f"Estimated ZX90 gate length : {zx90_duration:.1f} ns")
 
             if monitor_spectator_qubits:
-                for idx, label in enumerate(spectators_fit_results_0.keys()):
+                for _, label in enumerate(spectators_fit_results_0.keys()):
                     f_s = self.qubits[label].frequency
                     print("")
                     print("Spectator qubit ")
@@ -1738,26 +1620,16 @@ class CalibrationMixin(
                             0.5 * (raw_Omega_0 - raw_Omega_1),
                         ]
                     )
-                    compensated_Omega_0 = spectators_compensated_fit_results_0[label]["Omega"]
-                    compensated_Omega_1 = spectators_compensated_fit_results_1[label]["Omega"]
-                    compensated_Omega = np.concatenate(
-                        [
-                            0.5 * (compensated_Omega_0 + compensated_Omega_1),
-                            0.5 * (compensated_Omega_0 - compensated_Omega_1),
-                        ]
-                    )
+
+                    
                     raw_coeffs = dict(
                         zip(
                             ["IX", "IY", "IZ", "ZX", "ZY", "ZZ"],
                             raw_Omega / (2 * np.pi),  # GHz
                         )
                     )
-                    compensated_coeffs = dict(
-                        zip(
-                            ["IX", "IY", "IZ", "ZX", "ZY", "ZZ"],
-                            compensated_Omega / (2 * np.pi),  # GHz
-                        )
-                    )
+                    
+
                     print("")
                     for key, value in raw_coeffs.items():
                         print(
@@ -1766,12 +1638,7 @@ class CalibrationMixin(
                     print(f"  r2 (raw: control |0〉): {spectators_fit_results_0[label]['r2']}")
                     print(f"  r2 (raw: control |1〉): {spectators_fit_results_1[label]['r2']}")
                     print("")
-                    for key, value in compensated_coeffs.items():
-                        print(
-                            f"  {key} : {value * 1e3:+.4f} MHz (compensated)"
-                        )
-                    print(f"  r2 (compensated: control |0〉): {spectators_compensated_fit_results_0[label]['r2']:.3f}")
-                    print(f"  r2 (compensated: control |1〉): {spectators_compensated_fit_results_1[label]['r2']:.3f}")
+
                 print("")
 
         return Result(
