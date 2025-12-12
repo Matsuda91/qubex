@@ -905,6 +905,7 @@ class CalibrationMixin(
         interval: float = DEFAULT_INTERVAL,
         reset_awg_and_capunits: bool = True,
         monitor_spectator_qubits: bool = False,
+        spectator_state: Literal["0","1","+","i"] | None = None,
         plot: bool = True,
     ) -> Result:
         cr_label = f"{control_qubit}-{target_qubit}"
@@ -967,8 +968,14 @@ class CalibrationMixin(
             spectator_qubits = []
             frequencies = {}
         
-        initial_state = {control_qubit: control_state}
-        
+        initial_state = {
+                control_qubit: control_state,
+                target_qubit: "0"
+            }
+        if spectator_state is not None:
+            for spectator in spectator_qubits:
+                initial_state[spectator] = spectator_state
+
         def cr_sequence(targets:list[str], T:float) -> PulseSchedule:
             cr = CrossResonance(
                 control_qubit=control_qubit,
@@ -1122,6 +1129,7 @@ class CalibrationMixin(
         interval: float = DEFAULT_INTERVAL,
         reset_awg_and_capunits: bool = True,
         monitor_spectator_qubits: bool = False,
+        spectator_state: Literal["+"] | None = None,
         plot: bool = True,
     ) -> Result:
         cr_label = f"{control_qubit}-{target_qubit}"
@@ -1153,6 +1161,7 @@ class CalibrationMixin(
             interval=interval,
             reset_awg_and_capunits=False,
             monitor_spectator_qubits=monitor_spectator_qubits,
+            spectator_state=spectator_state,
             plot=False,
         )
 
@@ -1174,6 +1183,7 @@ class CalibrationMixin(
             interval=interval,
             reset_awg_and_capunits=False,
             monitor_spectator_qubits=monitor_spectator_qubits,
+            spectator_state=spectator_state,
             plot=False,
         )
 
@@ -1658,7 +1668,9 @@ class CalibrationMixin(
                 "result_1": result_1,
                 "fig_c": fig_c,
                 "fig_t": fig_t,
-                "figs_s": figs_s,
+                "spectators":{
+                    "figs_s": figs_s,
+                }
             }
         )
 
