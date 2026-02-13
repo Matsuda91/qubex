@@ -538,6 +538,7 @@ class MeasurementProtocol(Protocol):
         initial_state: TargetMap[str] | None = None,
         shots: int = DEFAULT_SHOTS,
         interval: float = DEFAULT_INTERVAL,
+        total_sequence_duration: int | None = None,
         reset_awg_and_capunits: bool = True,
         plot: bool = False,
     ) -> dict[str, tuple[float, float, float]]:
@@ -556,6 +557,8 @@ class MeasurementProtocol(Protocol):
             Number of shots. Defaults to DEFAULT_SHOTS.
         interval : float, optional
             Interval between shots. Defaults to DEFAULT_INTERVAL.
+        total_sequence_duration : int, optional
+            Total sequence duration in ns. Defaults to None. If None, it is not used.
         plot : bool, optional
             Whether to plot the measured signals. Defaults to False.
 
