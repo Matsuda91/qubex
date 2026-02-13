@@ -11,7 +11,7 @@ from plotly.subplots import make_subplots
 from ...analysis import FitResult, fitting, util
 from ...analysis import visualization as viz
 from ...backend import SAMPLING_PERIOD, Target
-from ...measurement.measurement import DEFAULT_INTERVAL, DEFAULT_SHOTS
+from ...measurement.measurement import BLOCK_DURATION, DEFAULT_INTERVAL, DEFAULT_SHOTS
 from ...pulse import (
     CrossResonance,
     Drag,
@@ -2269,6 +2269,7 @@ class CalibrationMixin(
         x180_margin: float | None = None,
         shots: int = DEFAULT_SHOTS,
         interval: float = DEFAULT_INTERVAL,
+        total_sequence_duration: int | None = None,
         reset_awg_and_capunits: bool = True,
         plot: bool = True,
     ) -> Result:
@@ -2310,6 +2311,11 @@ class CalibrationMixin(
             x180 = {
                 control_qubit: self.x180(control_qubit),
             }
+        if total_sequence_duration is None:
+            total_t = np.max(time_range) + ramptime * 2 + PI_DURATION + HPI_DURATION
+            total_sequence_duration = int(
+                np.ceil(total_t / BLOCK_DURATION) * BLOCK_DURATION
+            )
 
         if reset_awg_and_capunits:
             self.reset_awg_and_capunits(
@@ -2375,6 +2381,7 @@ class CalibrationMixin(
                 initial_state={control_qubit: control_state},
                 shots=shots,
                 interval=interval,
+                total_sequence_duration=total_sequence_duration,
                 reset_awg_and_capunits=False,
                 plot=False,
             )
@@ -2521,6 +2528,7 @@ class CalibrationMixin(
         x180_margin: float | None = None,
         shots: int = CALIBRATION_SHOTS,
         interval: float = DEFAULT_INTERVAL,
+        total_sequence_duration: int | None = None,
         reset_awg_and_capunits: bool = True,
         plot: bool = True,
     ) -> Result:
@@ -2567,6 +2575,7 @@ class CalibrationMixin(
             x180_margin=x180_margin,
             shots=shots,
             interval=interval,
+            total_sequence_duration=total_sequence_duration,
             reset_awg_and_capunits=False,
             plot=False,
         )
@@ -2592,6 +2601,7 @@ class CalibrationMixin(
             x180_margin=x180_margin,
             shots=shots,
             interval=interval,
+            total_sequence_duration=total_sequence_duration,
             reset_awg_and_capunits=False,
             plot=False,
         )

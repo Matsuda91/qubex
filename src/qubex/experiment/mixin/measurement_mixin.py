@@ -1314,6 +1314,7 @@ class MeasurementMixin(
         initial_state: TargetMap[str] | None = None,
         shots: int = DEFAULT_SHOTS,
         interval: float = DEFAULT_INTERVAL,
+        total_sequence_duration: int | None = None,
         reset_awg_and_capunits: bool = True,
         method: Literal["measure", "execute"] = "measure",
         use_zvalues: bool = False,
@@ -1365,6 +1366,12 @@ class MeasurementMixin(
                         ps.add(qubit, y90m)
                     elif basis == "Y":
                         ps.add(qubit, x90p)
+                ps.barrier()
+                if total_sequence_duration is not None:
+                    ps.pad(
+                        total_duration=total_sequence_duration,
+                        pad_side="left",
+                    )
 
             if method == "execute":
                 measure_result = self.execute(
