@@ -42,12 +42,12 @@ from ..experiment_constants import (
     DEFAULT_RABI_TIME_RANGE,
 )
 from ..experiment_result import (
-    SweepData,
     AmplRabiData,
     ExperimentResult,
     FreqRabiData,
     RabiData,
     RamseyData,
+    SweepData,
     T1Data,
     T2Data,
 )
@@ -485,6 +485,180 @@ class CharacterizationMixin(
                         viz.save_figure_image(
                             fig_fit,
                             name=f"chevron_pattern_fit_{target}",
+                            width=600,
+                            height=300,
+                        )
+
+        rabi_rates = dict(sorted(rabi_rates.items()))
+        chevron_data = dict(sorted(chevron_data.items()))
+        resonant_frequencies = dict(sorted(resonant_frequencies.items()))
+
+        return Result(
+            data={
+                "time_range": time_range,
+                "detuning_range": detuning_range,
+                "frequencies": frequencies,
+                "chevron_data": chevron_data,
+                "rabi_rates": rabi_rates,
+                "resonant_frequencies": resonant_frequencies,
+                "fig": figs,
+            }
+        )
+
+    def ef_chevron_pattern(
+        self,
+        targets: Collection[str] | str | None = None,
+        *,
+        detuning_range: ArrayLike = np.linspace(-0.05, 0.05, 51),
+        time_range: ArrayLike = DEFAULT_RABI_TIME_RANGE,
+        frequencies: dict[str, float] | None = None,
+        amplitudes: dict[str, float] | None = None,
+        shots: int = DEFAULT_SHOTS,
+        interval: float = DEFAULT_INTERVAL,
+        plot: bool = True,
+        save_image: bool = True,
+    ) -> Result:
+
+        if targets is None:
+            targets = self.qubit_labels
+        elif isinstance(targets, str):
+            targets = [targets]
+        else:
+            targets = list(targets)
+
+        if frequencies is None:
+            frequencies = {
+                Target.ef_label(target): self.targets[Target.ef_label(target)].frequency
+                for target in targets
+            }
+
+        detuning_range = np.array(detuning_range, dtype=np.float64)
+        time_range = np.array(time_range, dtype=np.float64)
+
+        if amplitudes is None:
+            amplitudes = {
+                Target.ef_label(target): self.params.control_amplitude.get(
+                    Target.ef_label(target), self.params.control_amplitude[target]
+                )
+                for target in targets
+            }
+
+        rabi_rates: dict[str, NDArray] = {}
+        chevron_data: dict[str, NDArray] = {}
+        resonant_frequencies: dict[str, float] = {}
+
+        print(f"Targets : {targets}")
+        subgroups = self.util.create_qubit_subgroups(targets)
+        figs = {}
+        for idx, subgroup in enumerate(subgroups):
+            if len(subgroup) == 0:
+                continue
+
+            print(f"Subgroup ({idx + 1}/{len(subgroups)}) : {subgroup}")
+
+            rabi_rates_buffer: dict[str, list[float]] = defaultdict(list)
+            chevron_data_buffer: dict[str, list[NDArray]] = defaultdict(list)
+
+            def ef_rabi_sequence(T: int) -> PulseSchedule:
+                with PulseSchedule(subgroup) as ps:
+                    for target in subgroup:
+                        ps.add(target, self.x180(target))
+                        ps.add(
+                            target,
+                            Rect(
+                                duration=T,
+                                amplitude=amplitudes[Target.ef_label(target)],
+                            ),
+                        )
+                        ps.add(target, self.x180(target))
+                return ps
+
+            for detuning in tqdm(detuning_range):
+                frequencies = {
+                    Target.ef_label(target): frequencies[Target.ef_label(target)]
+                    + detuning
+                    for target in subgroup
+                }
+                with self.modified_frequencies(frequencies):
+                    sweep_result = self.sweep_parameter(
+                        sequence=ef_rabi_sequence,
+                        sweep_range=time_range,
+                        shots=shots,
+                        interval=interval,
+                    )
+                    sweep_data = sweep_result.data
+
+                    for target, data in sweep_data.items():
+                        fit_result = fitting.fit_rabi(
+                            target=data.target,
+                            times=data.sweep_range,
+                            data=data.data,
+                            plot=False,
+                        )
+                        rabi_rates_buffer[target].append(
+                            fit_result.get("frequency", np.nan)
+                        )
+                        chevron_data_buffer[target].append(data.normalized)
+
+            for target in subgroup:
+                rabi_rates[target] = np.array(rabi_rates_buffer[target])
+                chevron_data[target] = np.array(chevron_data_buffer[target]).T
+
+                fig = go.Figure()
+                fig.add_trace(
+                    go.Heatmap(
+                        x=detuning_range + frequencies[Target.ef_label(target)],
+                        y=time_range,
+                        z=chevron_data[target],
+                        colorscale="Viridis",
+                    )
+                )
+                fig.update_layout(
+                    title=dict(
+                        text=f"Chevron pattern : {target}",
+                        subtitle=dict(
+                            text=f"control_amplitude={amplitudes[Target.ef_label(target)]:.6g}",
+                            font=dict(
+                                size=13,
+                                family="monospace",
+                            ),
+                        ),
+                    ),
+                    xaxis_title="Drive frequency (GHz)",
+                    yaxis_title="Time (ns)",
+                    width=600,
+                    height=400,
+                    margin=dict(t=80),
+                )
+                figs[target] = fig
+                if plot:
+                    fig.show()
+
+                try:
+                    fit_result = fitting.fit_detuned_rabi(
+                        target=target,
+                        control_frequencies=detuning_range
+                        + frequencies[Target.ef_label(target)],
+                        rabi_frequencies=rabi_rates[target],
+                        plot=plot,
+                    )
+                    resonant_frequencies[target] = fit_result["f_resonance"]
+                except Exception as e:
+                    logger.warning(f"Failed to fit detuned Rabi for {target}: {e}")
+                    resonant_frequencies[target] = np.nan
+
+                if save_image:
+                    viz.save_figure_image(
+                        fig,
+                        name=f"ef_chevron_pattern_{target}",
+                        width=600,
+                        height=400,
+                    )
+                    fig_fit = fit_result["fig"]
+                    if fig_fit is not None:
+                        viz.save_figure_image(
+                            fig_fit,
+                            name=f"ef_chevron_pattern_fit_{target}",
                             width=600,
                             height=300,
                         )
