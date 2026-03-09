@@ -625,7 +625,7 @@ class CharacterizationMixin(
                 )
                 fig.update_layout(
                     title=dict(
-                        text=f"Chevron pattern : {target}",
+                        text=f"Chevron pattern : {ef_label}",
                         subtitle=dict(
                             text=f"control_amplitude={amplitudes[ef_label]:.6g}",
                             font=dict(
