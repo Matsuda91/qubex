@@ -577,35 +577,37 @@ class CharacterizationMixin(
                 return ps
 
             for detuning in tqdm(detuning_range):
-                mod_freqs = {
-                    Target.ef_label(target): frequencies[Target.ef_label(target)]
-                    + detuning
-                    for target in subgroup
-                }
-                with self.modified_frequencies(mod_freqs):
-                    sweep_result = self.sweep_parameter(
-                        sequence=ef_rabi_sequence,
-                        sweep_range=time_range,
-                        shots=shots,
-                        interval=interval,
-                    )
-                    sweep_data = sweep_result.data
-
-                    for target, data in sweep_data.items():
-                        ef_label = Target.ef_label(target)
-                        ge_rabi_param = self.ge_rabi_params[target]
-                        iq_g = ge_rabi_param.endpoints[0]
-                        fit_result = fitting.fit_rabi(
-                            target=data.target,
-                            times=data.sweep_range,
-                            data=data.data,
-                            reference_point=iq_g,
+                with self.util.no_output():
+                    mod_freqs = {
+                        Target.ef_label(target): frequencies[Target.ef_label(target)]
+                        + detuning
+                        for target in subgroup
+                    }
+                    with self.modified_frequencies(mod_freqs):
+                        sweep_result = self.sweep_parameter(
+                            sequence=ef_rabi_sequence,
+                            sweep_range=time_range,
+                            shots=shots,
+                            interval=interval,
                             plot=False,
                         )
-                        rabi_rates_buffer[ef_label].append(
-                            fit_result.get("frequency", np.nan)
-                        )
-                        chevron_data_buffer[ef_label].append(data.normalized)
+                        sweep_data = sweep_result.data
+
+                        for target, data in sweep_data.items():
+                            ef_label = Target.ef_label(target)
+                            ge_rabi_param = self.ge_rabi_params[target]
+                            iq_g = ge_rabi_param.endpoints[0]
+                            fit_result = fitting.fit_rabi(
+                                target=data.target,
+                                times=data.sweep_range,
+                                data=data.data,
+                                reference_point=iq_g,
+                                plot=False,
+                            )
+                            rabi_rates_buffer[ef_label].append(
+                                fit_result.get("frequency", np.nan)
+                            )
+                            chevron_data_buffer[ef_label].append(data.normalized)
 
             for target in subgroup:
                 ef_label = Target.ef_label(target)
