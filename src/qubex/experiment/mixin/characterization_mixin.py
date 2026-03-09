@@ -574,12 +574,12 @@ class CharacterizationMixin(
                 return ps
 
             for detuning in tqdm(detuning_range):
-                frequencies = {
+                mod_freqs = {
                     Target.ef_label(target): frequencies[Target.ef_label(target)]
                     + detuning
                     for target in subgroup
                 }
-                with self.modified_frequencies(frequencies):
+                with self.modified_frequencies(mod_freqs):
                     sweep_result = self.sweep_parameter(
                         sequence=ef_rabi_sequence,
                         sweep_range=time_range,
@@ -589,25 +589,30 @@ class CharacterizationMixin(
                     sweep_data = sweep_result.data
 
                     for target, data in sweep_data.items():
+                        ef_label = Target.ef_label(target)
+                        ge_rabi_param = self.ge_rabi_params[target]
+                        iq_g = ge_rabi_param.endpoints[0]
                         fit_result = fitting.fit_rabi(
                             target=data.target,
                             times=data.sweep_range,
                             data=data.data,
+                            reference_point=iq_g,
                             plot=False,
                         )
-                        rabi_rates_buffer[target].append(
+                        rabi_rates_buffer[ef_label].append(
                             fit_result.get("frequency", np.nan)
                         )
-                        chevron_data_buffer[target].append(data.normalized)
+                        chevron_data_buffer[ef_label].append(data.normalized)
 
             for target in subgroup:
-                rabi_rates[target] = np.array(rabi_rates_buffer[target])
-                chevron_data[target] = np.array(chevron_data_buffer[target]).T
+                ef_label = Target.ef_label(target)
+                rabi_rates[target] = np.array(rabi_rates_buffer[ef_label])
+                chevron_data[target] = np.array(chevron_data_buffer[ef_label]).T
 
                 fig = go.Figure()
                 fig.add_trace(
                     go.Heatmap(
-                        x=detuning_range + frequencies[Target.ef_label(target)],
+                        x=detuning_range + frequencies[ef_label],
                         y=time_range,
                         z=chevron_data[target],
                         colorscale="Viridis",
@@ -617,7 +622,7 @@ class CharacterizationMixin(
                     title=dict(
                         text=f"Chevron pattern : {target}",
                         subtitle=dict(
-                            text=f"control_amplitude={amplitudes[Target.ef_label(target)]:.6g}",
+                            text=f"control_amplitude={amplitudes[ef_label]:.6g}",
                             font=dict(
                                 size=13,
                                 family="monospace",
@@ -637,8 +642,7 @@ class CharacterizationMixin(
                 try:
                     fit_result = fitting.fit_detuned_rabi(
                         target=target,
-                        control_frequencies=detuning_range
-                        + frequencies[Target.ef_label(target)],
+                        control_frequencies=detuning_range + frequencies[ef_label],
                         rabi_frequencies=rabi_rates[target],
                         plot=plot,
                     )
