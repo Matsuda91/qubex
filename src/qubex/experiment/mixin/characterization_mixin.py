@@ -564,7 +564,7 @@ class CharacterizationMixin(
                     for target in subgroup:
                         ps.add(target, self.x180(target))
                         ps.add(
-                            target,
+                            Target.ef_label(target),
                             Rect(
                                 duration=T,
                                 amplitude=amplitudes[Target.ef_label(target)],
