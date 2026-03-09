@@ -627,7 +627,7 @@ class CharacterizationMixin(
                     title=dict(
                         text=f"Chevron pattern : {ef_label}",
                         subtitle=dict(
-                            text=f"control_amplitude={amplitudes[ef_label]:.6g}",
+                            text=f"control_amplitude={amplitudes[ef_label]:.6g}, f_ge = {self.targets[target].frequency:.4f} GHz",
                             font=dict(
                                 size=13,
                                 family="monospace",
@@ -675,6 +675,14 @@ class CharacterizationMixin(
         rabi_rates = dict(sorted(rabi_rates.items()))
         chevron_data = dict(sorted(chevron_data.items()))
         resonant_frequencies = dict(sorted(resonant_frequencies.items()))
+
+        print("")
+        print("anharmonicity (GHz):")
+        for target in sorted(resonant_frequencies.keys()):
+            print(
+                f"    {target}: {resonant_frequencies[target] - self.targets[target].frequency:.6g}"
+            )
+        print("")
 
         return Result(
             data={
