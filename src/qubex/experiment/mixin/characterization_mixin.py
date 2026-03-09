@@ -563,6 +563,7 @@ class CharacterizationMixin(
                 with PulseSchedule(subgroup) as ps:
                     for target in subgroup:
                         ps.add(target, self.x180(target))
+                        ps.barrier()
                         ps.add(
                             Target.ef_label(target),
                             Rect(
@@ -570,6 +571,7 @@ class CharacterizationMixin(
                                 amplitude=amplitudes[Target.ef_label(target)],
                             ),
                         )
+                        ps.barrier()
                         ps.add(target, self.x180(target))
                 return ps
 
