@@ -538,7 +538,8 @@ class CharacterizationMixin(
         if amplitudes is None:
             amplitudes = {
                 Target.ef_label(target): self.params.control_amplitude.get(
-                    Target.ef_label(target), self.params.control_amplitude[target]
+                    Target.ef_label(target),
+                    self.params.control_amplitude[target] / np.sqrt(2),
                 )
                 for target in targets
             }
