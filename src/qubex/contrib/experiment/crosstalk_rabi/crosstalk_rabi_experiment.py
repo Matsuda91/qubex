@@ -2,15 +2,18 @@
 
 import warnings
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import jsonpickle
 import numpy as np
+import plotly.graph_objects as go
 from numpy.typing import NDArray
 from qxpulse import FlatTop, PulseSchedule
 
 import qubex as qx
+import qubex.visualization as viz
 from qubex.analysis.fitting import FitResult, FitStatus
 from qubex.experiment.experiment_constants import DEFAULT_RABI_TIME_RANGE, HPI_DURATION
 from qubex.experiment.models.experiment_result import (
@@ -52,6 +55,80 @@ class CrosstalkRabiData(RabiData):
     def is_kj(self) -> bool:
         """Return whether the drive and measured target are different."""
         return self.drive_target != self.measure_target
+
+
+def _next_failed_fit_plot_name(
+    *,
+    drive_target: str,
+    measure_target: str,
+    images_dir: Path | str = "images",
+) -> str:
+    images_path = Path(images_dir)
+    images_path.mkdir(parents=True, exist_ok=True)
+    date = datetime.now().strftime("%Y%m%d")
+    prefix = f"CrosstalkRabiExperiment_{drive_target}-{measure_target}_{date}_"
+    idx = 0
+    while (images_path / f"{prefix}{idx}.png").exists():
+        idx += 1
+    return f"{prefix}{idx}"
+
+
+def _save_failed_fit_plot(
+    *,
+    rabi_data: CrosstalkRabiData,
+    drive_target: str,
+    measure_target: str,
+    kind: str,
+    fit_result: FitResult,
+    images_dir: Path | str = "images",
+) -> Path:
+    time_range = np.asarray(rabi_data.time_range)
+    fig = viz.make_figure()
+    fig.add_trace(
+        go.Scatter(
+            mode="markers+lines",
+            x=time_range,
+            y=np.asarray(rabi_data.data).real,
+            name="I",
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            mode="markers+lines",
+            x=time_range,
+            y=np.asarray(rabi_data.data).imag,
+            name="Q",
+        )
+    )
+    fig.update_layout(
+        title=(
+            "Failed crosstalk Rabi fit "
+            f"({kind}) : drive={drive_target}, measure={measure_target}, data={rabi_data.target}"
+        ),
+        xaxis_title="Drive duration (ns)",
+        yaxis_title="Signal (arb. units)",
+    )
+    fig.add_annotation(
+        xref="paper",
+        yref="paper",
+        x=0.99,
+        y=0.99,
+        xanchor="right",
+        yanchor="top",
+        text=f"status={fit_result.status.value}<br>{fit_result.message or ''}",
+        showarrow=False,
+        bgcolor="rgba(255, 255, 255, 0.8)",
+    )
+
+    image_name = _next_failed_fit_plot_name(
+        drive_target=drive_target,
+        measure_target=measure_target,
+        images_dir=images_dir,
+    )
+    viz.save_figure(fig, name=image_name, images_dir=images_dir)
+    image_path = Path(images_dir) / f"{image_name}.png"
+    print(f"Saved failed crosstalk Rabi plot to {image_path}")
+    return image_path
 
 
 def _save_config_result(
@@ -281,11 +358,27 @@ def _measure_crosstalk_rabi_experiment(
             name=f"{SAVE_FILENAME}",
             description=SAVE_DESCRIPTION_TEMPLATE(drive_target, measure_target),
         )
+    else:
+        _save_failed_fit_plot(
+            rabi_data=rabi_data_jj,
+            drive_target=drive_target,
+            measure_target=measure_target,
+            kind="jj",
+            fit_result=fit_result_jj,
+        )
     if fit_result_kj.status == FitStatus.SUCCESS:
         result_kj = ExperimentResult(data={measure_target: rabi_data_kj})
         result_kj.save(
             name=f"{SAVE_FILENAME}",
             description=SAVE_DESCRIPTION_TEMPLATE(drive_target, measure_target),
+        )
+    else:
+        _save_failed_fit_plot(
+            rabi_data=rabi_data_kj,
+            drive_target=drive_target,
+            measure_target=measure_target,
+            kind="kj",
+            fit_result=fit_result_kj,
         )
 
     config_result = Result(

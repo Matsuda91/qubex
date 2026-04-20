@@ -12,7 +12,12 @@ from qubex.experiment.models.experiment_record import ExperimentRecord
 from qubex.experiment.models.experiment_result import ExperimentResult
 
 from .crosstalk_rabi_constants import DEFAULT_DATA_DIR, SAVE_FILENAME
-from .crosstalk_rabi_matrix import CrosstalkRabiMatrix
+from .crosstalk_rabi_matrix import (
+    STATUS_LABELS,
+    CrosstalkRabiMatrix,
+    _build_target_index,
+    _canonical_target,
+)
 from .crosstalk_rabi_result import CrosstalkRabiPairSummary
 
 
@@ -97,6 +102,12 @@ class CrosstalkRabiCollection:
         if not data_path.exists():
             raise FileNotFoundError(f"Data directory does not exist: {data_path}")
 
+        print(
+            "Crosstalk Rabi matrix status: "
+            f"drive_target={drive_target}, measure_target={measure_target}, "
+            f"status={self._pair_status_label(drive_target, measure_target)}"
+        )
+
         matched_records: list[tuple[str, float, str, ExperimentResult[Any]]] = []
         for path in sorted(data_path.glob(f"*_{SAVE_FILENAME}_*.json")):
             record = ExperimentRecord.load(path.name, data_dir=str(data_path))
@@ -115,21 +126,6 @@ class CrosstalkRabiCollection:
                     getattr(target_data, "target", None),
                 )
                 == measure_target
-            ):
-                matched_records.append(
-                    (
-                        record.created_at,
-                        path.stat().st_mtime,
-                        path.name,
-                        experiment_result,
-                    )
-                )
-                continue
-
-            description = record.description
-            if (
-                f"drive_target={drive_target}" in description
-                and f"measure_target={measure_target}" in description
             ):
                 matched_records.append(
                     (
@@ -164,3 +160,15 @@ class CrosstalkRabiCollection:
         if not hasattr(target_data, "plot"):
             raise TypeError("Loaded crosstalk-Rabi result does not support plotting.")
         return target_data.plot(**kwargs)
+
+    def _pair_status_label(self, drive_target: str, measure_target: str) -> str:
+        """Return the current matrix status label for one drive/measure pair."""
+        target_index = _build_target_index(self.matrix.targets)
+        try:
+            row = target_index[_canonical_target(measure_target)]
+            column = target_index[_canonical_target(drive_target)]
+        except KeyError:
+            return "unknown"
+
+        status = int(self.matrix.status_matrix[row, column])
+        return STATUS_LABELS.get(status, str(status))
