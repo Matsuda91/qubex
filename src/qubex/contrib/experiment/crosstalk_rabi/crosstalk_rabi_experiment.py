@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import jsonpickle
+import numpy as np
 from numpy.typing import NDArray
 from qxpulse import FlatTop, PulseSchedule
 
@@ -21,6 +22,7 @@ from qubex.experiment.models.result import Result
 
 from .crosstalk_rabi_constants import (
     DEFAULT_CONFIG_DIR,
+    DEFAULT_CROSSTALK_RABI_TIME_RANGE,
     HIGH_INDEX,
     LOW_INDEX,
     SAVE_DESCRIPTION_TEMPLATE,
@@ -297,12 +299,15 @@ def measure_crosstalk_rabi_experiment(
     *,
     drive_target: str,
     measure_target: str,
-    time_range: NDArray,
+    time_range: NDArray | None = None,
     drive_amplitude: float | None = None,
     plot_rabi: bool = True,
     plot_fit: bool = True,
 ) -> Result:
     """Run the crosstalk Rabi experiment for targets in the same frequency group."""
+    if time_range is None:
+        time_range = np.asarray(DEFAULT_CROSSTALK_RABI_TIME_RANGE)
+
     try:
         _validate_qubit_pairs(
             drive_target,
