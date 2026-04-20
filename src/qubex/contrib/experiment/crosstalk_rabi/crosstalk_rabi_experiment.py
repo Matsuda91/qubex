@@ -18,6 +18,8 @@ from qubex.experiment.models.experiment_result import (
 )
 from qubex.experiment.models.result import Result
 
+from .crosstalk_rabi_pair_summary import CrosstalkRabiPairSummary, build_pair_summary
+
 DEFAULT_CONFIG_DIR = "crosstalk_rabi_config"
 SAVE_FILENAME = "CrosstalkRabiExperiment"
 
@@ -231,6 +233,13 @@ def _measure_crosstalk_rabi_experiment(
         plot=plot_fit,
     )
 
+    summary = build_pair_summary(
+        drive_target=drive_target,
+        measure_target=measure_target,
+        fit_result_jj=fit_result_jj,
+        fit_result_kj=fit_result_kj,
+    )
+
     if fit_result_jj.status == FitStatus.SUCCESS:
         result_jj = ExperimentResult(data={measure_target: rabi_data_jj})
         result_jj.save(
@@ -249,7 +258,8 @@ def _measure_crosstalk_rabi_experiment(
             "drive_target": drive_target,
             "measure_target": measure_target,
             "reference_points": reference_points,
-            "status": "finished",
+            "pair_summary": summary,
+            "status": summary.status,
         }
     )
 
@@ -279,11 +289,18 @@ def measure_crosstalk_rabi_experiment(
             measure_target,
         )
     except ValueError as exc:
+        summary = CrosstalkRabiPairSummary(
+            drive_target=drive_target,
+            measure_target=measure_target,
+            status="skipped",
+            warning=str(exc),
+        )
         warnings.warn(str(exc), stacklevel=2)
         return Result(
             data={
                 "drive_target": drive_target,
                 "measure_target": measure_target,
+                "pair_summary": summary,
                 "warning": str(exc),
                 "status": "skipped",
             }
@@ -297,3 +314,6 @@ def measure_crosstalk_rabi_experiment(
         plot_rabi=plot_rabi,
         plot_fit=plot_fit,
     )
+
+
+crosstalk_rabi_experiment = measure_crosstalk_rabi_experiment
