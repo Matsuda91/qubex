@@ -9,6 +9,7 @@ import jsonpickle
 import jsonpickle.ext.numpy as jsonpickle_numpy
 import numpy as np
 import plotly.graph_objects as go
+import qxvisualizer as viz
 from numpy.typing import NDArray
 
 from .crosstalk_rabi_pair_summary import CrosstalkRabiPairSummary
@@ -35,8 +36,22 @@ STATUS_BY_SUMMARY = {
 }
 
 
+def _canonical_target(target: str) -> str:
+    if target.startswith("Q") and target[1:].isdigit():
+        return f"Q{int(target[1:])}"
+    return target
+
+
 def _build_target_index(targets: list[str]) -> dict[str, int]:
-    return {target: index for index, target in enumerate(targets)}
+    target_index: dict[str, int] = {}
+    for index, target in enumerate(targets):
+        target_index.setdefault(target, index)
+        target_index.setdefault(_canonical_target(target), index)
+    return target_index
+
+
+def _matrix_figure_size(target_count: int) -> int:
+    return int(np.clip(420 + 12 * max(target_count, 1), 720, 1800))
 
 
 @dataclass
@@ -82,8 +97,8 @@ class CrosstalkRabiMatrix:
         """Update one matrix entry from a pair summary."""
         target_index = _build_target_index(self.targets)
         try:
-            row = target_index[summary.measure_target]
-            column = target_index[summary.drive_target]
+            row = target_index[_canonical_target(summary.measure_target)]
+            column = target_index[_canonical_target(summary.drive_target)]
         except KeyError as exc:
             raise ValueError(f"Unknown target in summary: {exc.args[0]}") from exc
 
@@ -111,7 +126,7 @@ class CrosstalkRabiMatrix:
                     {
                         "drive_target": drive_target,
                         "measure_target": measure_target,
-                        "ratio": None if np.isnan(value) else float(value),
+                        "ratio": None if np.isnan(value) else float(np.round(value, 2)),
                         "status": int(self.status_matrix[row, column]),
                         "status_label": STATUS_LABELS[
                             int(self.status_matrix[row, column])
@@ -124,28 +139,37 @@ class CrosstalkRabiMatrix:
         self, title: str = "Crosstalk Rabi ratio matrix"
     ) -> go.Figure:
         """Render the ratio matrix as a heatmap."""
+        figure_size = _matrix_figure_size(len(self.targets))
+        label_matrix = np.vectorize(STATUS_LABELS.get)(self.status_matrix)
+        text_size = int(np.clip(np.round(600 / max(len(self.targets), 1)), 7, 12))
         text = np.where(
-            np.isnan(self.r_matrix), "", np.round(self.r_matrix, 4).astype(str)
+            np.isnan(self.r_matrix), "", np.round(self.r_matrix, 2).astype(str)
         )
-        fig = go.Figure(
-            data=[
-                go.Heatmap(
-                    z=self.r_matrix,
-                    x=self.targets,
-                    y=self.targets,
-                    text=text,
-                    texttemplate="%{text}",
-                    colorbar_title="r_kj",
-                    hovertemplate=(
-                        "measure=%{y}<br>drive=%{x}<br>r_kj=%{z:.6f}<extra></extra>"
-                    ),
-                )
-            ]
+        fig = viz.make_figure()
+        fig.add_trace(
+            go.Heatmap(
+                z=self.r_matrix,
+                x=self.targets,
+                y=self.targets,
+                text=text,
+                customdata=label_matrix,
+                texttemplate="%{text}",
+                textfont={"size": text_size},
+                colorscale="Viridis",
+                colorbar_title="r_kj",
+                hovertemplate=(
+                    "measure=%{y}<br>drive=%{x}<br>r_kj=%{z:.2f}<br>status=%{customdata}<extra></extra>"
+                ),
+            )
         )
         fig.update_layout(
             title=title,
+            width=figure_size,
+            height=figure_size,
             xaxis_title="drive target j",
             yaxis_title="measure target k",
+            xaxis=dict(showgrid=True, gridcolor="rgba(0, 0, 0, 0.08)"),
+            yaxis=dict(showgrid=True, gridcolor="rgba(0, 0, 0, 0.08)"),
         )
         return fig
 
@@ -153,6 +177,7 @@ class CrosstalkRabiMatrix:
         self, title: str = "Crosstalk Rabi acquisition status"
     ) -> go.Figure:
         """Render the acquisition status as a categorical heatmap."""
+        figure_size = _matrix_figure_size(len(self.targets))
         label_matrix = np.vectorize(STATUS_LABELS.get)(self.status_matrix)
         colorscale = [
             [0.0, "#d9d9d9"],
@@ -164,30 +189,31 @@ class CrosstalkRabiMatrix:
             [0.75, "#ff7f0e"],
             [1.0, "#ff7f0e"],
         ]
-        fig = go.Figure(
-            data=[
-                go.Heatmap(
-                    z=self.status_matrix,
-                    x=self.targets,
-                    y=self.targets,
-                    text=label_matrix,
-                    texttemplate="%{text}",
-                    colorscale=colorscale,
-                    zmin=STATUS_NOT_MEASURED,
-                    zmax=STATUS_SKIPPED,
-                    colorbar=dict(
-                        title="status",
-                        tickvals=list(STATUS_LABELS),
-                        ticktext=[STATUS_LABELS[key] for key in STATUS_LABELS],
-                    ),
-                    hovertemplate=(
-                        "measure=%{y}<br>drive=%{x}<br>status=%{text}<extra></extra>"
-                    ),
-                )
-            ]
+        fig = viz.make_figure()
+        fig.add_trace(
+            go.Heatmap(
+                z=self.status_matrix,
+                x=self.targets,
+                y=self.targets,
+                text=label_matrix,
+                texttemplate="%{text}",
+                colorscale=colorscale,
+                zmin=STATUS_NOT_MEASURED,
+                zmax=STATUS_SKIPPED,
+                colorbar=dict(
+                    title="status",
+                    tickvals=list(STATUS_LABELS),
+                    ticktext=[STATUS_LABELS[key] for key in STATUS_LABELS],
+                ),
+                hovertemplate=(
+                    "measure=%{y}<br>drive=%{x}<br>status=%{text}<extra></extra>"
+                ),
+            )
         )
         fig.update_layout(
             title=title,
+            width=figure_size,
+            height=figure_size,
             xaxis_title="drive target j",
             yaxis_title="measure target k",
         )

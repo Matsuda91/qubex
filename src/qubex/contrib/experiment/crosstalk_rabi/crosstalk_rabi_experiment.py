@@ -27,7 +27,7 @@ LOW_INDEX = (0, 3)
 HIGH_INDEX = (1, 2)
 
 
-@dataclass
+@dataclass(kw_only=True)
 class CrosstalkRabiData(RabiData):
     """RabiData with explicit drive-target context for crosstalk experiments."""
 
@@ -53,7 +53,7 @@ def _save_config_result(
     config_result: Result,
     save_dir: Path | str = DEFAULT_CONFIG_DIR,
     base_name: str = SAVE_FILENAME,
-) -> Path:
+) -> None:
     save_dir = Path(save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
     file_path = save_dir / f"{base_name}.json"
@@ -136,19 +136,22 @@ def _crosstalk_rabi_experiment(
         drive_amplitude = 1.2 * ex.params.control_amplitude[drive_target]
 
     reference_points = ex.obtain_reference_points(
-        targets=[measure_target], n_shots=1024
+        targets=[drive_target, measure_target], n_shots=1024
     )["iq"]
 
     results_rabi_jj = ex.obtain_rabi_params(
-        targets=[drive_target],
-        amplitudes={drive_target: drive_amplitude},
+        targets=[drive_target, measure_target],
+        amplitudes={
+            drive_target: drive_amplitude,
+            measure_target: ex.params.control_amplitude.get(measure_target, None),
+        },  # for drive target only, corresponding to the crosstalk Rabi exp
         plot=plot_rabi_jj,
     )
     rabi_data_jj = CrosstalkRabiData(
         target=measure_target,
         data=results_rabi_jj.data[drive_target].data,
         time_range=time_range,
-        rabi_param=ex.rabi_params[drive_target],
+        rabi_param=ex.rabi_params.get(drive_target, None),
         drive_target=drive_target,
     )
 
@@ -179,7 +182,7 @@ def _crosstalk_rabi_experiment(
         target=measure_target,
         data=result_rabi_kj.data[measure_target].data,
         time_range=effective_time_range,
-        rabi_param=ex.rabi_params[measure_target],
+        rabi_param=ex.rabi_params.get(measure_target, None),
         drive_target=drive_target,
     )
 
@@ -223,13 +226,13 @@ def _measure_crosstalk_rabi_experiment(
     rabi_data_kj: CrosstalkRabiData = result.data["rabi_data_kj"]
 
     fit_result_jj: FitResult = rabi_data_jj.fit(
-        is_damp=True,
-        reference_points=reference_points,
+        is_damped=True,
+        reference_point=reference_points[drive_target],
         plot=plot_fit,
     )
     fit_result_kj: FitResult = rabi_data_kj.fit(
-        is_damp=True,
-        reference_points=reference_points,
+        is_damped=True,
+        reference_point=reference_points[measure_target],
         plot=plot_fit,
     )
 
@@ -314,6 +317,3 @@ def measure_crosstalk_rabi_experiment(
         plot_rabi=plot_rabi,
         plot_fit=plot_fit,
     )
-
-
-crosstalk_rabi_experiment = measure_crosstalk_rabi_experiment

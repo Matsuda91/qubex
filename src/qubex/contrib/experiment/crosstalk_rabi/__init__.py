@@ -2,7 +2,6 @@
 
 from .crosstalk_rabi_experiment import (
     CrosstalkRabiData,
-    crosstalk_rabi_experiment,
     measure_crosstalk_rabi_experiment,
 )
 from .crosstalk_rabi_matrix import (
@@ -22,6 +21,5 @@ __all__ = [
     "CrosstalkRabiData",
     "CrosstalkRabiMatrix",
     "CrosstalkRabiPairSummary",
-    "crosstalk_rabi_experiment",
     "measure_crosstalk_rabi_experiment",
 ]

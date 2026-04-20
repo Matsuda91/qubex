@@ -19,8 +19,8 @@ class CrosstalkRabiPairSummary:
     jj_frequency: float | None = None
     kj_frequency: float | None = None
     ratio: float = np.nan
-    jj_fit_status: str | None = None
-    kj_fit_status: str | None = None
+    jj_fit_status: FitStatus | None = None
+    kj_fit_status: FitStatus | None = None
     warning: str | None = None
 
 

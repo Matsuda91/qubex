@@ -7,6 +7,12 @@ from .experiment.crosstalk_cross_resonance import (
     cr_crosstalk_hamiltonian_tomography,
     measure_cr_crosstalk,
 )
+from .experiment.crosstalk_rabi import (
+    CrosstalkRabiData,
+    CrosstalkRabiMatrix,
+    CrosstalkRabiPairSummary,
+    measure_crosstalk_rabi_experiment,
+)
 from .experiment.multipartite_entanglement import (
     create_1d_cluster_sequence,
     create_connected_graphs,
@@ -69,6 +75,9 @@ from .experiment.thermal_excitation_characterization import (
 )
 
 __all__ = [
+    "CrosstalkRabiData",
+    "CrosstalkRabiMatrix",
+    "CrosstalkRabiPairSummary",
     "characterize_readout_parameters",
     "cr_crosstalk_hamiltonian_tomography",
     "create_1d_cluster_sequence",
@@ -95,6 +104,7 @@ __all__ = [
     "measure_bell_state_fidelities",
     "measure_bell_states",
     "measure_cr_crosstalk",
+    "measure_crosstalk_rabi_experiment",
     "measure_ghz_state",
     "measure_graph_state",
     "measurement_induced_dephasing",
