@@ -24,6 +24,7 @@ from .crosstalk_rabi_constants import (
     SAVE_DESCRIPTION_TEMPLATE,
     SAVE_FILENAME,
 )
+from .crosstalk_rabi_record import CrosstalkRabiRecord
 from .crosstalk_rabi_result import CrosstalkRabiPairSummary, build_pair_summary
 
 
@@ -32,6 +33,7 @@ class CrosstalkRabiData(RabiData):
     """RabiData with explicit drive-target context for crosstalk experiments."""
 
     drive_target: str
+    reference_point: complex | None = None
 
     @property
     def measure_target(self) -> str:
@@ -136,6 +138,7 @@ def _crosstalk_rabi_experiment(
     rabi_data_jj = CrosstalkRabiData(
         target=f"{drive_target}-{drive_target}",
         data=results_rabi_jj.data[drive_target].data,
+        reference_point=reference_points[drive_target],
         time_range=np.asarray(DEFAULT_RABI_TIME_RANGE),
         rabi_param=results_rabi_jj.data[drive_target].rabi_param,
         drive_target=drive_target,
@@ -167,6 +170,7 @@ def _crosstalk_rabi_experiment(
     rabi_data_kj = CrosstalkRabiData(
         target=f"{measure_target}-{drive_target}",
         data=result_rabi_kj.data[measure_target].data,
+        reference_point=reference_points[measure_target],
         time_range=effective_time_range,
         rabi_param=results_rabi_jj.data[measure_target].rabi_param,
         drive_target=drive_target,
@@ -232,26 +236,32 @@ def _measure_crosstalk_rabi_experiment(
         fit_result_kj=fit_result_kj,
     )
 
+    jj_result_file: str | None = None
     if fit_result_jj.status == FitStatus.SUCCESS:
         result_jj = ExperimentResult(data={measure_target: rabi_data_jj})
-        result_jj.save(
+        saved_jj = result_jj.save(
             name=f"{SAVE_FILENAME}",
             description=SAVE_DESCRIPTION_TEMPLATE(drive_target, measure_target),
         )
+        jj_result_file = saved_jj.file_name
+
+    kj_result_file: str | None = None
     if fit_result_kj.status == FitStatus.SUCCESS:
         result_kj = ExperimentResult(data={measure_target: rabi_data_kj})
-        result_kj.save(
+        saved_kj = result_kj.save(
             name=f"{SAVE_FILENAME}",
             description=SAVE_DESCRIPTION_TEMPLATE(drive_target, measure_target),
         )
+        kj_result_file = saved_kj.file_name
 
-    return Result(
-        data={
-            "drive_target": drive_target,
-            "measure_target": measure_target,
-            "pair_summary": summary,
-        }
+    pair_record = CrosstalkRabiRecord(
+        drive_target=drive_target,
+        measure_target=measure_target,
+        pair_summary=summary,
+        jj_result_file=jj_result_file,
+        kj_result_file=kj_result_file,
     )
+    saved_pair_record = pair_record.save()
 
 
 def measure_crosstalk_rabi_experiment(
@@ -280,12 +290,20 @@ def measure_crosstalk_rabi_experiment(
             status="not_crosstalk_pair",
             warning=str(exc),
         )
+        pair_record = CrosstalkRabiRecord(
+            drive_target=drive_target,
+            measure_target=measure_target,
+            pair_summary=summary,
+        )
+        saved_pair_record = pair_record.save()
         warnings.warn(str(exc), stacklevel=2)
         return Result(
             data={
                 "drive_target": drive_target,
                 "measure_target": measure_target,
                 "pair_summary": summary,
+                "pair_record": pair_record,
+                "pair_record_file": saved_pair_record.file_name,
                 "warning": str(exc),
                 "status": "not_crosstalk_pair",
             }
@@ -308,12 +326,20 @@ def measure_crosstalk_rabi_experiment(
             status="skipped",
             warning=str(exc),
         )
+        pair_record = CrosstalkRabiRecord(
+            drive_target=drive_target,
+            measure_target=measure_target,
+            pair_summary=summary,
+        )
+        saved_pair_record = pair_record.save()
         warnings.warn(str(exc), stacklevel=2)
         return Result(
             data={
                 "drive_target": drive_target,
                 "measure_target": measure_target,
                 "pair_summary": summary,
+                "pair_record": pair_record,
+                "pair_record_file": saved_pair_record.file_name,
                 "warning": str(exc),
                 "status": "skipped",
             }

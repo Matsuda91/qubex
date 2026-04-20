@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import jsonpickle
 import jsonpickle.ext.numpy as jsonpickle_numpy
@@ -20,6 +22,9 @@ from .crosstalk_rabi_status import (
     STATUS_NOT_MEASURED,
     STATUS_SKIPPED,
 )
+
+if TYPE_CHECKING:
+    from .crosstalk_rabi_record import CrosstalkRabiRecord
 
 jsonpickle_numpy.register_handlers()
 
@@ -42,6 +47,24 @@ def _matrix_figure_size(target_count: int) -> int:
     return int(np.clip(420 + 12 * max(target_count, 1), 720, 1800))
 
 
+def _load_matrix_cache(path: Path | str) -> CrosstalkRabiMatrix:
+    """Load a cached matrix snapshot from disk."""
+    return CrosstalkRabiMatrix._load_cache(path)
+
+
+def _save_matrix_cache(matrix: CrosstalkRabiMatrix, path: Path | str) -> Path:
+    """Save a cached matrix snapshot to disk."""
+    return matrix._save_cache(path)
+
+
+def _update_matrix(
+    matrix: CrosstalkRabiMatrix,
+    summary: CrosstalkRabiPairSummary,
+) -> None:
+    """Update one matrix entry from a pair summary."""
+    matrix._update(summary)
+
+
 @dataclass
 class CrosstalkRabiMatrix:
     """Store the crosstalk ratio matrix and its acquisition status."""
@@ -61,8 +84,8 @@ class CrosstalkRabiMatrix:
         )
 
     @classmethod
-    def load(cls, path: Path | str) -> CrosstalkRabiMatrix:
-        """Load a matrix from a JSON file encoded with jsonpickle."""
+    def _load_cache(cls, path: Path | str) -> CrosstalkRabiMatrix:
+        """Load a cached matrix snapshot from a JSON file encoded with jsonpickle."""
         file_path = Path(path)
         with file_path.open("r") as file:
             loaded = jsonpickle.decode(file.read())  # noqa: S301
@@ -70,8 +93,20 @@ class CrosstalkRabiMatrix:
             raise TypeError(f"Expected {cls.__name__}, got {type(loaded)}")
         return loaded
 
-    def save(self, path: Path | str) -> Path:
-        """Save the matrix to a JSON file encoded with jsonpickle."""
+    @classmethod
+    def from_records(
+        cls,
+        targets: list[str],
+        records: Iterable[CrosstalkRabiRecord],
+    ) -> CrosstalkRabiMatrix:
+        """Build a matrix projection from pair-level records."""
+        matrix = cls.create(targets)
+        for record in records:
+            matrix._update(record.pair_summary)
+        return matrix
+
+    def _save_cache(self, path: Path | str) -> Path:
+        """Save the matrix as a cached JSON snapshot."""
         file_path = Path(path)
         file_path.parent.mkdir(parents=True, exist_ok=True)
         encoded = jsonpickle.encode(self, unpicklable=True)
@@ -81,7 +116,7 @@ class CrosstalkRabiMatrix:
             file.write(encoded)
         return file_path
 
-    def update(self, summary: CrosstalkRabiPairSummary) -> None:
+    def _update(self, summary: CrosstalkRabiPairSummary) -> None:
         """Update one matrix entry from a pair summary."""
         target_index = _build_target_index(self.targets)
         try:

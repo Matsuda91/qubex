@@ -11,12 +11,16 @@ import plotly.graph_objects as go
 from qubex.experiment.models.experiment_record import ExperimentRecord
 from qubex.experiment.models.experiment_result import ExperimentResult
 
-from .crosstalk_rabi_constants import DEFAULT_DATA_DIR, SAVE_FILENAME
+from .crosstalk_rabi_constants import DEFAULT_DATA_DIR
 from .crosstalk_rabi_matrix import (
     CrosstalkRabiMatrix,
     _build_target_index,
     _canonical_target,
+    _load_matrix_cache,
+    _save_matrix_cache,
+    _update_matrix,
 )
+from .crosstalk_rabi_record import CrosstalkRabiRecord
 from .crosstalk_rabi_result import CrosstalkRabiPairSummary
 from .crosstalk_rabi_status import (
     STATUS_LABELS,
@@ -30,6 +34,7 @@ class CrosstalkRabiCollection:
     matrix: CrosstalkRabiMatrix
     matrix_path: Path | None = None
     data_dir: Path = Path(DEFAULT_DATA_DIR)
+    _records: list[CrosstalkRabiRecord] | None = None
 
     @classmethod
     def create(
@@ -44,34 +49,65 @@ class CrosstalkRabiCollection:
             matrix=CrosstalkRabiMatrix.create(targets),
             matrix_path=Path(matrix_path) if matrix_path is not None else None,
             data_dir=Path(data_dir),
+            _records=[],
         )
 
     @classmethod
-    def load(
+    def _load_cache(
         cls,
         matrix_path: Path | str,
         *,
         data_dir: Path | str = DEFAULT_DATA_DIR,
     ) -> CrosstalkRabiCollection:
-        """Load a collection from a saved matrix file."""
+        """Load a collection from a cached matrix snapshot."""
         path = Path(matrix_path)
         return cls(
-            matrix=CrosstalkRabiMatrix.load(path),
+            matrix=_load_matrix_cache(path),
             matrix_path=path,
             data_dir=Path(data_dir),
+            _records=None,
         )
 
-    def save(self, matrix_path: Path | str | None = None) -> Path:
-        """Save the current matrix and return the written path."""
+    @classmethod
+    def load_records(
+        cls,
+        *,
+        data_dir: Path | str = DEFAULT_DATA_DIR,
+    ) -> CrosstalkRabiCollection:
+        """Load a collection by rebuilding the matrix from saved pair records."""
+        targets = [f"Q{i:03d}" for i in range(144)]
+        base_path = Path(data_dir)
+        records = CrosstalkRabiRecord.list(data_dir=base_path)
+        return cls(
+            matrix=CrosstalkRabiMatrix.from_records(targets, records),
+            matrix_path=None,
+            data_dir=base_path,
+            _records=records,
+        )
+
+    def _save_cache(self, matrix_path: Path | str | None = None) -> Path:
+        """Save the current matrix as a cached snapshot and return the written path."""
         target_path = Path(matrix_path) if matrix_path is not None else self.matrix_path
         if target_path is None:
             raise ValueError("matrix_path must be provided before saving.")
         self.matrix_path = target_path
-        return self.matrix.save(target_path)
+        return _save_matrix_cache(self.matrix, target_path)
 
-    def update(self, summary: CrosstalkRabiPairSummary) -> None:
+    def _update(self, summary: CrosstalkRabiPairSummary) -> None:
         """Update the matrix with one pair summary."""
-        self.matrix.update(summary)
+        _update_matrix(self.matrix, summary)
+
+    def rebuild_matrix(self, targets: list[str] | None = None) -> CrosstalkRabiMatrix:
+        """Rebuild the in-memory matrix from saved pair records."""
+        matrix_targets = (
+            list(targets) if targets is not None else list(self.matrix.targets)
+        )
+        self._records = CrosstalkRabiRecord.list(data_dir=self.data_dir)
+        self.matrix = CrosstalkRabiMatrix.from_records(
+            matrix_targets,
+            self._records,
+        )
+        return self.matrix
 
     def pending_pairs(self) -> list[tuple[str, str]]:
         """Return drive/measure pairs that are still pending."""
@@ -99,10 +135,15 @@ class CrosstalkRabiCollection:
         drive_target: str,
         measure_target: str,
     ) -> ExperimentResult[Any]:
-        """Load the latest saved ExperimentResult for one drive/measure pair."""
+        """Load the saved ExperimentResult referenced by the matrix-backed pair record."""
         data_path = self.data_dir
         if not data_path.exists():
             raise FileNotFoundError(f"Data directory does not exist: {data_path}")
+
+        pair_record = self._find_record(
+            drive_target=drive_target,
+            measure_target=measure_target,
+        )
 
         print(
             "Crosstalk Rabi matrix status: "
@@ -110,42 +151,18 @@ class CrosstalkRabiCollection:
             f"status={self._pair_status_label(drive_target, measure_target)}"
         )
 
-        matched_records: list[tuple[str, float, str, ExperimentResult[Any]]] = []
-        for path in sorted(data_path.glob(f"*_{SAVE_FILENAME}_*.json")):
-            record = ExperimentRecord.load(path.name, data_dir=str(data_path))
-            experiment_result = record.data
-            if not isinstance(experiment_result, ExperimentResult):
-                continue
-            if len(experiment_result.data) != 1:
-                continue
-
-            target_data = next(iter(experiment_result.data.values()))
-            if (
-                getattr(target_data, "drive_target", None) == drive_target
-                and getattr(
-                    target_data,
-                    "measure_target",
-                    getattr(target_data, "target", None),
-                )
-                == measure_target
-            ):
-                matched_records.append(
-                    (
-                        record.created_at,
-                        path.stat().st_mtime,
-                        path.name,
-                        experiment_result,
-                    )
-                )
-
-        if not matched_records:
+        result_file = pair_record.kj_result_file
+        if result_file is None:
             raise FileNotFoundError(
-                "No crosstalk-Rabi ExperimentResult JSON found for "
+                "No saved crosstalk-Rabi ExperimentResult is referenced by the "
+                "latest pair record for "
                 f"drive_target={drive_target}, measure_target={measure_target}."
             )
 
-        matched_records.sort(key=lambda item: (item[0], item[1], item[2]))
-        return matched_records[-1][3]
+        saved_result = ExperimentRecord.load(result_file, data_dir=str(data_path)).data
+        if not isinstance(saved_result, ExperimentResult):
+            raise TypeError(f"Expected ExperimentResult, got {type(saved_result)}")
+        return saved_result
 
     def plot_rabi(
         self,
@@ -174,3 +191,27 @@ class CrosstalkRabiCollection:
 
         status = int(self.matrix.status_matrix[row, column])
         return STATUS_LABELS.get(status, str(status))
+
+    def _find_record(
+        self,
+        drive_target: str,
+        measure_target: str,
+    ) -> CrosstalkRabiRecord:
+        """Return the latest pair record used to build the current matrix state."""
+        if self._records is None:
+            raise ValueError(
+                "find_result() requires a record-backed collection. "
+                "Use load_records() or rebuild_matrix() before loading results."
+            )
+
+        for record in reversed(self._records):
+            if (
+                record.drive_target == drive_target
+                and record.measure_target == measure_target
+            ):
+                return record
+
+        raise FileNotFoundError(
+            "No crosstalk-Rabi pair record found for "
+            f"drive_target={drive_target}, measure_target={measure_target}."
+        )
