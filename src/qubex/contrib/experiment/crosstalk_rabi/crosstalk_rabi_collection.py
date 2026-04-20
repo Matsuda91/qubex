@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import plotly.graph_objects as go
 
 from qubex.experiment.models.experiment_record import ExperimentRecord
@@ -121,14 +122,18 @@ class CrosstalkRabiCollection:
         self, title: str = "Crosstalk Rabi ratio matrix"
     ) -> go.Figure:
         """Plot the stored crosstalk ratio matrix."""
-        return self.matrix.plot_ratio_matrix(title=title)
+        fig = self.matrix.plot_ratio_matrix(title=title)
+        self._apply_record_hover(fig, include_ratio=True)
+        return fig
 
     def plot_status_matrix(
         self,
         title: str = "Crosstalk Rabi acquisition status",
     ) -> go.Figure:
         """Plot the stored crosstalk acquisition-status matrix."""
-        return self.matrix.plot_status_matrix(title=title)
+        fig = self.matrix.plot_status_matrix(title=title)
+        self._apply_record_hover(fig, include_ratio=False)
+        return fig
 
     def find_result(
         self,
@@ -191,6 +196,95 @@ class CrosstalkRabiCollection:
 
         status = int(self.matrix.status_matrix[row, column])
         return STATUS_LABELS.get(status, str(status))
+
+    def _apply_record_hover(self, fig: go.Figure, *, include_ratio: bool) -> None:
+        """Attach latest record metadata to matrix hover when record data is loaded."""
+        if self._records is None or not fig.data:
+            return
+
+        fig.data[0].customdata = self._record_hover_customdata()
+        if include_ratio:
+            fig.data[0].hovertemplate = (
+                "measure=%{y}<br>"
+                "drive=%{x}<br>"
+                "r_kj=%{z:.5f}<br>"
+                "status=%{customdata[0]}<br>"
+                "jj_fit_status=%{customdata[1]}<br>"
+                "kj_fit_status=%{customdata[2]}<br>"
+                "jj_frequency=%{customdata[3]}<br>"
+                "kj_frequency=%{customdata[4]}<br>"
+                "record_warning=%{customdata[5]}<br>"
+                "jj_result_file=%{customdata[6]}<br>"
+                "kj_result_file=%{customdata[7]}<extra></extra>"
+            )
+            return
+
+        fig.data[0].hovertemplate = (
+            "measure=%{y}<br>"
+            "drive=%{x}<br>"
+            "status=%{customdata[0]}<br>"
+            "jj_fit_status=%{customdata[1]}<br>"
+            "kj_fit_status=%{customdata[2]}<br>"
+            "jj_frequency=%{customdata[3]}<br>"
+            "kj_frequency=%{customdata[4]}<br>"
+            "record_warning=%{customdata[5]}<br>"
+            "jj_result_file=%{customdata[6]}<br>"
+            "kj_result_file=%{customdata[7]}<extra></extra>"
+        )
+
+    def _record_hover_customdata(self) -> np.ndarray:
+        """Build per-cell hover metadata from the latest record for each pair."""
+        customdata = np.empty(
+            (len(self.matrix.targets), len(self.matrix.targets), 8),
+            dtype=object,
+        )
+        customdata[:] = "-"
+
+        latest_records = self._latest_record_map()
+        target_index = _build_target_index(self.matrix.targets)
+
+        for (drive_target, measure_target), record in latest_records.items():
+            try:
+                row = target_index[_canonical_target(measure_target)]
+                column = target_index[_canonical_target(drive_target)]
+            except KeyError:
+                continue
+
+            summary = record.pair_summary
+            customdata[row, column] = [
+                summary.status,
+                self._stringify_hover_value(summary.jj_fit_status),
+                self._stringify_hover_value(summary.kj_fit_status),
+                self._stringify_hover_value(summary.jj_frequency),
+                self._stringify_hover_value(summary.kj_frequency),
+                self._stringify_hover_value(summary.warning),
+                self._stringify_hover_value(record.jj_result_file),
+                self._stringify_hover_value(record.kj_result_file),
+            ]
+
+        return customdata
+
+    def _latest_record_map(self) -> dict[tuple[str, str], CrosstalkRabiRecord]:
+        """Return the latest loaded record for each drive/measure pair."""
+        latest_records: dict[tuple[str, str], CrosstalkRabiRecord] = {}
+        if self._records is None:
+            return latest_records
+
+        for record in self._records:
+            latest_records[(record.drive_target, record.measure_target)] = record
+        return latest_records
+
+    def _stringify_hover_value(self, value: Any) -> str:
+        """Convert optional hover metadata into stable human-readable strings."""
+        if value is None:
+            return "-"
+        if isinstance(value, float):
+            if np.isnan(value):
+                return "nan"
+            return f"{value:.6g}"
+        if hasattr(value, "name"):
+            return str(value.name).lower()
+        return str(value)
 
     def _find_record(
         self,
