@@ -3,6 +3,7 @@
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import jsonpickle
 from numpy.typing import NDArray
@@ -58,16 +59,31 @@ def _save_config_result(
     save_dir.mkdir(parents=True, exist_ok=True)
     file_path = save_dir / f"{base_name}.json"
 
-    config_save_data = {
-        "measure_target": config_result.data["measure_target"],
-        "reference_points": config_result.data["reference_points"],
-    }
+    config_save_data: dict[str, Any] = {}
+    if file_path.exists():
+        with file_path.open("r") as f:
+            loaded = jsonpickle.decode(f.read())  # noqa: S301
+        if isinstance(loaded, dict):
+            config_save_data = dict(loaded)
+
+    existing_reference_points = config_save_data.get("reference_points")
+    if not isinstance(existing_reference_points, dict):
+        existing_reference_points = {}
+
+    new_reference_points = config_result.data["reference_points"]
+    if not isinstance(new_reference_points, dict):
+        raise TypeError("config_result.data['reference_points'] must be a mapping.")
+
+    merged_reference_points = dict(existing_reference_points)
+    merged_reference_points.update(new_reference_points)
+
+    config_save_data["reference_points"] = merged_reference_points
     file_path.parent.mkdir(parents=True, exist_ok=True)
     encoded = jsonpickle.encode(config_save_data, unpicklable=True)
     if not isinstance(encoded, str):
         raise TypeError("jsonpickle.encode() must return a string.")
 
-    with file_path.open("w", encoding="utf-8") as f:
+    with file_path.open("w") as f:
         f.write(encoded)
 
     print(f"Saved crosstalk Rabi config result to {file_path}")
