@@ -12,7 +12,7 @@ from qxpulse import FlatTop, PulseSchedule
 
 import qubex as qx
 from qubex.analysis.fitting import FitResult, FitStatus
-from qubex.experiment.experiment_constants import HPI_DURATION
+from qubex.experiment.experiment_constants import DEFAULT_RABI_TIME_RANGE, HPI_DURATION
 from qubex.experiment.models.experiment_result import (
     ExperimentResult,
     RabiData,
@@ -40,7 +40,8 @@ class CrosstalkRabiData(RabiData):
     @property
     def measure_target(self) -> str:
         """Return the measured target label."""
-        return self.target
+        pair = self.target.split("-")
+        return pair[0]
 
     @property
     def is_jj(self) -> bool:
@@ -149,12 +150,15 @@ def _crosstalk_rabi_experiment(
     *,
     drive_target: str,
     measure_target: str,
-    time_range: NDArray,
+    crosstalk_rabi_time_range: NDArray | None = None,
     drive_amplitude: float | None = None,
     ramp_time: int = HPI_DURATION,
     plot_rabi_jj: bool = True,
     plot_rabi_kj: bool = True,
 ) -> Result:
+
+    if crosstalk_rabi_time_range is None:
+        crosstalk_rabi_time_range = np.asarray(DEFAULT_CROSSTALK_RABI_TIME_RANGE)
 
     if drive_amplitude is None:
         drive_amplitude = 1.2 * ex.params.control_amplitude[drive_target]
@@ -165,6 +169,7 @@ def _crosstalk_rabi_experiment(
 
     results_rabi_jj = ex.obtain_rabi_params(
         targets=[drive_target, measure_target],
+        time_range=np.asarray(DEFAULT_RABI_TIME_RANGE),
         amplitudes={
             drive_target: drive_amplitude,
             measure_target: ex.params.control_amplitude.get(measure_target, 0.1),
@@ -172,10 +177,10 @@ def _crosstalk_rabi_experiment(
         plot=plot_rabi_jj,
     )
     rabi_data_jj = CrosstalkRabiData(
-        target=measure_target,
+        target=f"{drive_target}-{drive_target}",
         data=results_rabi_jj.data[drive_target].data,
-        time_range=time_range,
-        rabi_param=ex.rabi_params.get(drive_target),
+        time_range=np.asarray(DEFAULT_RABI_TIME_RANGE),
+        rabi_param=results_rabi_jj.data[drive_target].rabi_param,
         drive_target=drive_target,
     )
 
@@ -194,19 +199,19 @@ def _crosstalk_rabi_experiment(
 
     result_rabi_kj: ExperimentResult[SweepData] = ex.sweep_parameter(
         sequence=rabi_sequence,
-        sweep_range=time_range,
+        sweep_range=crosstalk_rabi_time_range,
         frequencies={
             drive_target: ex.targets[measure_target].frequency,
             measure_target: ex.targets[measure_target].frequency,
         },
         plot=plot_rabi_kj,
     )
-    effective_time_range = time_range + ramp_time
+    effective_time_range = crosstalk_rabi_time_range + ramp_time
     rabi_data_kj = CrosstalkRabiData(
-        target=measure_target,
+        target=f"{measure_target}-{drive_target}",
         data=result_rabi_kj.data[measure_target].data,
         time_range=effective_time_range,
-        rabi_param=ex.rabi_params.get(measure_target),
+        rabi_param=results_rabi_jj.data[measure_target].rabi_param,
         drive_target=drive_target,
     )
 
@@ -227,12 +232,15 @@ def _measure_crosstalk_rabi_experiment(
     *,
     drive_target: str,
     measure_target: str,
-    time_range: NDArray,
+    crosstalk_rabi_time_range: NDArray | None = None,
     drive_amplitude: float | None = None,
     plot_rabi: bool = True,
     plot_fit: bool = True,
 ) -> Result:
     """Run the measurement, fit, and persistence flow for one crosstalk pair."""
+    if crosstalk_rabi_time_range is None:
+        crosstalk_rabi_time_range = np.asarray(DEFAULT_CROSSTALK_RABI_TIME_RANGE)
+
     if drive_amplitude is None:
         drive_amplitude = 1.2 * ex.params.control_amplitude[drive_target]
 
@@ -240,7 +248,7 @@ def _measure_crosstalk_rabi_experiment(
         ex=ex,
         drive_target=drive_target,
         measure_target=measure_target,
-        time_range=time_range,
+        crosstalk_rabi_time_range=crosstalk_rabi_time_range,
         drive_amplitude=drive_amplitude,
         plot_rabi_jj=plot_rabi,
         plot_rabi_kj=plot_rabi,
@@ -299,14 +307,14 @@ def measure_crosstalk_rabi_experiment(
     *,
     drive_target: str,
     measure_target: str,
-    time_range: NDArray | None = None,
+    crosstalk_rabi_time_range: NDArray | None = None,
     drive_amplitude: float | None = None,
     plot_rabi: bool = True,
     plot_fit: bool = True,
 ) -> Result:
     """Run the crosstalk Rabi experiment for targets in the same frequency group."""
-    if time_range is None:
-        time_range = np.asarray(DEFAULT_CROSSTALK_RABI_TIME_RANGE)
+    if crosstalk_rabi_time_range is None:
+        crosstalk_rabi_time_range = np.asarray(DEFAULT_CROSSTALK_RABI_TIME_RANGE)
 
     try:
         _validate_qubit_pairs(
@@ -344,7 +352,7 @@ def measure_crosstalk_rabi_experiment(
         ex=ex,
         drive_target=drive_target,
         measure_target=measure_target,
-        time_range=time_range,
+        crosstalk_rabi_time_range=crosstalk_rabi_time_range,
         drive_amplitude=drive_amplitude,
         plot_rabi=plot_rabi,
         plot_fit=plot_fit,

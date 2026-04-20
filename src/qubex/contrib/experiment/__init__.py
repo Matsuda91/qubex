@@ -6,10 +6,10 @@ from .crosstalk_cross_resonance import (
     measure_cr_crosstalk,
 )
 from .crosstalk_rabi import (
+    CrosstalkRabiCollection,
     CrosstalkRabiData,
     CrosstalkRabiMatrix,
     CrosstalkRabiPairSummary,
-    find_crosstalk_rabi_experiment_jsons,
     measure_crosstalk_rabi_experiment,
 )
 from .multipartite_entanglement import (
@@ -63,6 +63,7 @@ from .thermal_excitation_characterization import (
 )
 
 __all__ = [
+    "CrosstalkRabiCollection",
     "CrosstalkRabiData",
     "CrosstalkRabiMatrix",
     "CrosstalkRabiPairSummary",
@@ -81,7 +82,6 @@ __all__ = [
     "create_measurement_rounds",
     "create_mqc_sequence",
     "decompose_cr_crosstalk",
-    "find_crosstalk_rabi_experiment_jsons",
     "fourier_analysis",
     "get_resistance_charge",
     "get_superconducting_gap",

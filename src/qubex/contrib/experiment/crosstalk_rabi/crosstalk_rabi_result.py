@@ -3,16 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 
 from qubex.analysis.fitting import FitResult, FitStatus
-from qubex.experiment.models.experiment_record import ExperimentRecord
-from qubex.experiment.models.experiment_result import ExperimentResult
 
-from .crosstalk_rabi_constants import DEFAULT_DATA_DIR, SAVE_FILENAME
-from .crosstalk_rabi_experiment import CrosstalkRabiData
+if TYPE_CHECKING:
+    pass
 
 
 @dataclass
@@ -76,65 +74,3 @@ def build_pair_summary(
         kj_fit_status=fit_result_kj.status,
         warning=warning,
     )
-
-
-def find_crosstalk_rabi_experiment_jsons(
-    *,
-    drive_target: str,
-    measure_target: str,
-    data_dir: Path | str = DEFAULT_DATA_DIR,
-) -> ExperimentResult[CrosstalkRabiData]:
-    """Load the latest saved ExperimentResult for one crosstalk-Rabi pair."""
-    data_path = Path(data_dir)
-    if not data_path.exists():
-        raise FileNotFoundError(f"Data directory does not exist: {data_path}")
-
-    matched_records: list[
-        tuple[str, float, str, ExperimentResult[CrosstalkRabiData]]
-    ] = []
-    for path in sorted(data_path.glob(f"*_{SAVE_FILENAME}_*.json")):
-        record = ExperimentRecord.load(path.name, data_dir=str(data_path))
-        experiment_result = record.data
-        if not isinstance(experiment_result, ExperimentResult):
-            continue
-        if len(experiment_result.data) != 1:
-            continue
-
-        target_data = next(iter(experiment_result.data.values()))
-        if isinstance(target_data, CrosstalkRabiData):
-            if (
-                target_data.drive_target == drive_target
-                and target_data.measure_target == measure_target
-            ):
-                matched_records.append(
-                    (
-                        record.created_at,
-                        path.stat().st_mtime,
-                        path.name,
-                        experiment_result,
-                    )
-                )
-                continue
-
-        description = record.description
-        if (
-            f"drive_target={drive_target}" in description
-            and f"measure_target={measure_target}" in description
-        ):
-            matched_records.append(
-                (
-                    record.created_at,
-                    path.stat().st_mtime,
-                    path.name,
-                    experiment_result,
-                )
-            )
-
-    if not matched_records:
-        raise FileNotFoundError(
-            "No crosstalk-Rabi ExperimentResult JSON found for "
-            f"drive_target={drive_target}, measure_target={measure_target}."
-        )
-
-    matched_records.sort(key=lambda item: (item[0], item[1], item[2]))
-    return matched_records[-1][3]

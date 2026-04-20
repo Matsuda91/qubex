@@ -157,8 +157,10 @@ class CrosstalkRabiMatrix:
                 textfont={"size": text_size},
                 colorscale="Viridis",
                 colorbar_title="r_kj",
+                zmin=np.min(self.r_matrix[np.isfinite(self.r_matrix)]),
+                zmax=np.max(self.r_matrix[np.isfinite(self.r_matrix)]),
                 hovertemplate=(
-                    "measure=%{y}<br>drive=%{x}<br>r_kj=%{z:.2f}<br>status=%{customdata}<extra></extra>"
+                    "measure=%{y}<br>drive=%{x}<br>r_kj=%{z:.5f}<br>status=%{customdata}<extra></extra>"
                 ),
             )
         )
