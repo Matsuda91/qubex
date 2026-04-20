@@ -13,27 +13,15 @@ import qxvisualizer as viz
 from numpy.typing import NDArray
 
 from .crosstalk_rabi_result import CrosstalkRabiPairSummary
+from .crosstalk_rabi_status import (
+    STATUS_BY_SUMMARY,
+    STATUS_LABELS,
+    STATUS_NOT_CROSSTALK_PAIR,
+    STATUS_NOT_MEASURED,
+    STATUS_SKIPPED,
+)
 
 jsonpickle_numpy.register_handlers()
-
-STATUS_NOT_MEASURED = 0
-STATUS_MEASURED = 1
-STATUS_FIT_FAILED = 2
-STATUS_SKIPPED = 3
-
-STATUS_LABELS = {
-    STATUS_NOT_MEASURED: "not_measured",
-    STATUS_MEASURED: "measured",
-    STATUS_FIT_FAILED: "fit_failed",
-    STATUS_SKIPPED: "skipped",
-}
-
-STATUS_BY_SUMMARY = {
-    "not_measured": STATUS_NOT_MEASURED,
-    "measured": STATUS_MEASURED,
-    "fit_failed": STATUS_FIT_FAILED,
-    "skipped": STATUS_SKIPPED,
-}
 
 
 def _canonical_target(target: str) -> str:
@@ -182,13 +170,15 @@ class CrosstalkRabiMatrix:
         figure_size = _matrix_figure_size(len(self.targets))
         label_matrix = np.vectorize(STATUS_LABELS.get)(self.status_matrix)
         colorscale = [
-            [0.0, "#d9d9d9"],
-            [0.25, "#d9d9d9"],
-            [0.25, "#1f77b4"],
-            [0.5, "#1f77b4"],
-            [0.5, "#d62728"],
-            [0.75, "#d62728"],
-            [0.75, "#ff7f0e"],
+            [0.0, "#ffffff"],
+            [0.2, "#ffffff"],
+            [0.2, "#b2b2b2"],
+            [0.4, "#b2b2b2"],
+            [0.4, "#1f77b4"],
+            [0.6, "#1f77b4"],
+            [0.6, "#d62728"],
+            [0.8, "#d62728"],
+            [0.8, "#ff7f0e"],
             [1.0, "#ff7f0e"],
         ]
         fig = viz.make_figure()
@@ -200,7 +190,7 @@ class CrosstalkRabiMatrix:
                 text=label_matrix,
                 texttemplate="%{text}",
                 colorscale=colorscale,
-                zmin=STATUS_NOT_MEASURED,
+                zmin=STATUS_NOT_CROSSTALK_PAIR,
                 zmax=STATUS_SKIPPED,
                 colorbar=dict(
                     title="status",

@@ -13,12 +13,14 @@ from qubex.experiment.models.experiment_result import ExperimentResult
 
 from .crosstalk_rabi_constants import DEFAULT_DATA_DIR, SAVE_FILENAME
 from .crosstalk_rabi_matrix import (
-    STATUS_LABELS,
     CrosstalkRabiMatrix,
     _build_target_index,
     _canonical_target,
 )
 from .crosstalk_rabi_result import CrosstalkRabiPairSummary
+from .crosstalk_rabi_status import (
+    STATUS_LABELS,
+)
 
 
 @dataclass
