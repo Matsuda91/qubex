@@ -11,7 +11,10 @@ from .crosstalk_rabi_matrix import (
     STATUS_SKIPPED,
     CrosstalkRabiMatrix,
 )
-from .crosstalk_rabi_pair_summary import CrosstalkRabiPairSummary
+from .crosstalk_rabi_result import (
+    CrosstalkRabiPairSummary,
+    find_crosstalk_rabi_experiment_jsons,
+)
 
 __all__ = [
     "STATUS_FIT_FAILED",
@@ -21,5 +24,6 @@ __all__ = [
     "CrosstalkRabiData",
     "CrosstalkRabiMatrix",
     "CrosstalkRabiPairSummary",
+    "find_crosstalk_rabi_experiment_jsons",
     "measure_crosstalk_rabi_experiment",
 ]

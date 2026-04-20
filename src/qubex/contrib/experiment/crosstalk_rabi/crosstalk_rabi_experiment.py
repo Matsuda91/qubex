@@ -19,13 +19,14 @@ from qubex.experiment.models.experiment_result import (
 )
 from qubex.experiment.models.result import Result
 
-from .crosstalk_rabi_pair_summary import CrosstalkRabiPairSummary, build_pair_summary
-
-DEFAULT_CONFIG_DIR = "crosstalk_rabi_config"
-SAVE_FILENAME = "CrosstalkRabiExperiment"
-
-LOW_INDEX = (0, 3)
-HIGH_INDEX = (1, 2)
+from .crosstalk_rabi_constants import (
+    DEFAULT_CONFIG_DIR,
+    HIGH_INDEX,
+    LOW_INDEX,
+    SAVE_DESCRIPTION_TEMPLATE,
+    SAVE_FILENAME,
+)
+from .crosstalk_rabi_result import CrosstalkRabiPairSummary, build_pair_summary
 
 
 @dataclass(kw_only=True)
@@ -164,7 +165,7 @@ def _crosstalk_rabi_experiment(
         targets=[drive_target, measure_target],
         amplitudes={
             drive_target: drive_amplitude,
-            measure_target: ex.params.control_amplitude.get(measure_target, None),
+            measure_target: ex.params.control_amplitude.get(measure_target, 0.1),
         },  # for drive target only, corresponding to the crosstalk Rabi exp
         plot=plot_rabi_jj,
     )
@@ -172,7 +173,7 @@ def _crosstalk_rabi_experiment(
         target=measure_target,
         data=results_rabi_jj.data[drive_target].data,
         time_range=time_range,
-        rabi_param=ex.rabi_params.get(drive_target, None),
+        rabi_param=ex.rabi_params.get(drive_target),
         drive_target=drive_target,
     )
 
@@ -203,7 +204,7 @@ def _crosstalk_rabi_experiment(
         target=measure_target,
         data=result_rabi_kj.data[measure_target].data,
         time_range=effective_time_range,
-        rabi_param=ex.rabi_params.get(measure_target, None),
+        rabi_param=ex.rabi_params.get(measure_target),
         drive_target=drive_target,
     )
 
@@ -268,13 +269,13 @@ def _measure_crosstalk_rabi_experiment(
         result_jj = ExperimentResult(data={measure_target: rabi_data_jj})
         result_jj.save(
             name=f"{SAVE_FILENAME}",
-            description=f"Rabi data for drive_target={drive_target} and measure_target={measure_target}",
+            description=SAVE_DESCRIPTION_TEMPLATE(drive_target, measure_target),
         )
     if fit_result_kj.status == FitStatus.SUCCESS:
         result_kj = ExperimentResult(data={measure_target: rabi_data_kj})
         result_kj.save(
             name=f"{SAVE_FILENAME}",
-            description=f"Rabi data for drive_target={drive_target} and measure_target={measure_target}",
+            description=SAVE_DESCRIPTION_TEMPLATE(drive_target, measure_target),
         )
 
     config_result = Result(

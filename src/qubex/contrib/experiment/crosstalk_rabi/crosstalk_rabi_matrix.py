@@ -12,7 +12,7 @@ import plotly.graph_objects as go
 import qxvisualizer as viz
 from numpy.typing import NDArray
 
-from .crosstalk_rabi_pair_summary import CrosstalkRabiPairSummary
+from .crosstalk_rabi_result import CrosstalkRabiPairSummary
 
 jsonpickle_numpy.register_handlers()
 
