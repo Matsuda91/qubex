@@ -105,6 +105,11 @@ def is_low(target: str) -> bool:
     return _target_index(target) % 4 in LOW_INDEX
 
 
+def _validate_qubit_pairs(drive_target: str, measure_target: str) -> None:
+    if drive_target == measure_target:
+        raise ValueError("Drive and measure targets must be different.")
+
+
 def _validate_frequency_group(
     drive_target: str,
     measure_target: str,
@@ -298,6 +303,11 @@ def measure_crosstalk_rabi_experiment(
 ) -> Result:
     """Run the crosstalk Rabi experiment for targets in the same frequency group."""
     try:
+        _validate_qubit_pairs(
+            drive_target,
+            measure_target,
+        )
+
         _validate_frequency_group(
             drive_target,
             measure_target,
