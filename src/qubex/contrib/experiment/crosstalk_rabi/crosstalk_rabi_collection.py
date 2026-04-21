@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import plotly.graph_objects as go
@@ -12,7 +12,7 @@ import plotly.graph_objects as go
 from qubex.experiment.models.experiment_record import ExperimentRecord
 from qubex.experiment.models.experiment_result import ExperimentResult
 
-from .crosstalk_rabi_constants import DEFAULT_DATA_DIR
+from .crosstalk_rabi_constants import DEFAULT_DATA_DIR, SAVE_FILENAME
 from .crosstalk_rabi_matrix import (
     CrosstalkRabiMatrix,
     _build_target_index,
@@ -135,10 +135,43 @@ class CrosstalkRabiCollection:
         self._apply_record_hover(fig, include_ratio=False)
         return fig
 
+    def load_record(
+        self,
+        *,
+        date: str | int,
+        id: int,
+    ) -> CrosstalkRabiRecord:
+        """Load one saved CrosstalkRabiRecord by date and file id."""
+        file_name = self._build_saved_file_name(
+            date=date,
+            id=id,
+            record_kind="record",
+        )
+        return CrosstalkRabiRecord.load(file_name, data_dir=self.data_dir)
+
+    def load_result(
+        self,
+        *,
+        date: str | int,
+        id: int,
+    ) -> ExperimentResult[Any]:
+        """Load one saved crosstalk-Rabi ExperimentResult by date and file id."""
+        file_name = self._build_saved_file_name(
+            date=date,
+            id=id,
+            record_kind="result",
+        )
+        loaded = ExperimentRecord.load(file_name, data_dir=str(self.data_dir)).data
+        if not isinstance(loaded, ExperimentResult):
+            raise TypeError(f"Expected ExperimentResult, got {type(loaded)}")
+        return loaded
+
     def find_result(
         self,
         drive_target: str,
         measure_target: str,
+        *,
+        result_kind: Literal["kj", "jj"] = "kj",
     ) -> ExperimentResult[Any]:
         """Load the saved ExperimentResult referenced by the matrix-backed pair record."""
         data_path = self.data_dir
@@ -156,11 +189,11 @@ class CrosstalkRabiCollection:
             f"status={self._pair_status_label(drive_target, measure_target)}"
         )
 
-        result_file = pair_record.kj_result_file
+        result_file = self._select_result_file(pair_record, result_kind=result_kind)
         if result_file is None:
             raise FileNotFoundError(
-                "No saved crosstalk-Rabi ExperimentResult is referenced by the "
-                "latest pair record for "
+                f"No saved {result_kind} crosstalk-Rabi ExperimentResult is "
+                "referenced by the latest pair record for "
                 f"drive_target={drive_target}, measure_target={measure_target}."
             )
 
@@ -173,12 +206,15 @@ class CrosstalkRabiCollection:
         self,
         drive_target: str,
         measure_target: str,
+        *,
+        result_kind: Literal["kj", "jj"] = "kj",
         **kwargs,
     ) -> go.Figure | None:
         """Load and plot the latest saved Rabi result for one drive/measure pair."""
         experiment_result = self.find_result(
             drive_target=drive_target,
             measure_target=measure_target,
+            result_kind=result_kind,
         )
         target_data = next(iter(experiment_result.data.values()))
         if not hasattr(target_data, "plot"):
@@ -196,6 +232,33 @@ class CrosstalkRabiCollection:
 
         status = int(self.matrix.status_matrix[row, column])
         return STATUS_LABELS.get(status, str(status))
+
+    def _build_saved_file_name(
+        self,
+        *,
+        date: str | int,
+        id: int,
+        record_kind: Literal["record", "result"],
+    ) -> str:
+        """Build one saved JSON file name from the common crosstalk-Rabi pattern."""
+        if record_kind == "record":
+            return f"{date}_{SAVE_FILENAME}Record_{id}.json"
+        if record_kind == "result":
+            return f"{date}_{SAVE_FILENAME}_{id}.json"
+        raise ValueError(f"Unsupported record_kind: {record_kind}")
+
+    def _select_result_file(
+        self,
+        pair_record: CrosstalkRabiRecord,
+        *,
+        result_kind: Literal["kj", "jj"],
+    ) -> str | None:
+        """Return the saved result file referenced by the pair record."""
+        if result_kind == "kj":
+            return pair_record.kj_result_file
+        if result_kind == "jj":
+            return pair_record.jj_result_file
+        raise ValueError(f"Unsupported result_kind: {result_kind}")
 
     def _apply_record_hover(self, fig: go.Figure, *, include_ratio: bool) -> None:
         """Attach latest record metadata to matrix hover when record data is loaded."""

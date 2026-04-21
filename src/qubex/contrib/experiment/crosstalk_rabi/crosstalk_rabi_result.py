@@ -55,13 +55,15 @@ def build_pair_summary(
     kj_frequency = fit_frequency(fit_result_kj)
     ratio = np.nan
     status = "fit_failed"
-    if jj_frequency is not None and kj_frequency is not None and jj_frequency != 0:
+    if (
+        fit_result_jj.status == FitStatus.SUCCESS
+        and fit_result_kj.status == FitStatus.SUCCESS
+        and jj_frequency is not None
+        and kj_frequency is not None
+        and jj_frequency != 0
+    ):
         ratio = kj_frequency / jj_frequency
-        if (
-            fit_result_jj.status == FitStatus.SUCCESS
-            and fit_result_kj.status == FitStatus.SUCCESS
-        ):
-            status = "measured"
+        status = "measured"
 
     return CrosstalkRabiPairSummary(
         drive_target=drive_target,
