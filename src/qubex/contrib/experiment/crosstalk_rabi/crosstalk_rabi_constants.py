@@ -11,4 +11,4 @@ SAVE_DESCRIPTION_TEMPLATE = lambda drive_target, measure_target: (
     f"Rabi data for drive_target={drive_target} and measure_target={measure_target}"
 )
 
-DEFAULT_CROSSTALK_RABI_TIME_RANGE = range(0, 10001, 1000)
+DEFAULT_CROSSTALK_RABI_TIME_RANGE = range(0, 40001, 1000)
