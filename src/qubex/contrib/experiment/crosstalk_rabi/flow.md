@@ -19,7 +19,7 @@ flowchart TD
     K --> L[Build CrosstalkRabiData for JJ]
     L --> M[sweep_parameter for KJ]
     M --> N[Build CrosstalkRabiData for KJ]
-    N --> O[Return raw Result\nreference_points, rabi_data_jj, rabi_data_kj]
+    N --> O[Return raw Result, reference_points, rabi_data_jj, rabi_data_kj]
 
     O --> P[Fit JJ data]
     P --> Q[Fit KJ data]
@@ -34,7 +34,7 @@ flowchart TD
     V -->|yes| W[Save ExperimentResult for KJ]
     V -->|no| X[Save failed-fit plot for KJ]
 
-    W --> Y[Build CrosstalkRabiRecord\npair_summary + saved result files]
+    W --> Y[Build CrosstalkRabiRecord, pair_summary + saved result files]
     X --> Y
     Y --> Z[Save CrosstalkRabiRecord]
     Z --> AA[Return Result\ndrive_target, measure_target, pair_summary, pair_record]
