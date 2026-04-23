@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
 
@@ -12,7 +13,11 @@ import plotly.graph_objects as go
 from qubex.experiment.models.experiment_record import ExperimentRecord
 from qubex.experiment.models.experiment_result import ExperimentResult
 
-from .crosstalk_rabi_constants import DEFAULT_DATA_DIR, SAVE_FILENAME
+from .crosstalk_rabi_constants import (
+    DEFAULT_DATA_DIR,
+    DEFAULT_IMAGES_DIR,
+    SAVE_FILENAME,
+)
 from .crosstalk_rabi_matrix import (
     CrosstalkRabiMatrix,
     _build_target_index,
@@ -35,6 +40,7 @@ class CrosstalkRabiCollection:
     matrix: CrosstalkRabiMatrix
     matrix_path: Path | None = None
     data_dir: Path = Path(DEFAULT_DATA_DIR)
+    images_dir: Path = Path(DEFAULT_IMAGES_DIR)
     _records: list[CrosstalkRabiRecord] | None = None
 
     @classmethod
@@ -119,21 +125,38 @@ class CrosstalkRabiCollection:
         return self.matrix.status_table()
 
     def plot_ratio_matrix(
-        self, title: str = "Crosstalk Rabi ratio matrix"
+        self,
+        title: str = "Crosstalk Rabi ratio matrix",
+        save_figure: bool = False,
     ) -> go.Figure:
         """Plot the stored crosstalk ratio matrix."""
         fig = self.matrix.plot_ratio_matrix(title=title)
         self._apply_record_hover(fig, include_ratio=True)
-        return fig
+        fig.show()
+        if save_figure:
+            now = datetime.now().strftime("%Y%m%d")
+            image_dir = self.images_dir
+            image_dir.mkdir(parents=True, exist_ok=True)
+            figure_path = image_dir / f"{SAVE_FILENAME}_ratio_matrix_{now}.pdf"
+            fig.write_image(figure_path)
+            print(f"Saved ratio matrix figure to {figure_path}")
 
     def plot_status_matrix(
         self,
         title: str = "Crosstalk Rabi acquisition status",
+        save_figure: bool = False,
     ) -> go.Figure:
         """Plot the stored crosstalk acquisition-status matrix."""
         fig = self.matrix.plot_status_matrix(title=title)
         self._apply_record_hover(fig, include_ratio=False)
-        return fig
+        fig.show()
+        if save_figure:
+            now = datetime.now().strftime("%Y%m%d")
+            image_dir = self.images_dir
+            image_dir.mkdir(parents=True, exist_ok=True)
+            figure_path = image_dir / f"{SAVE_FILENAME}_status_matrix_{now}.pdf"
+            fig.write_image(figure_path)
+            print(f"Saved status matrix figure to {figure_path}")
 
     def load_record(
         self,

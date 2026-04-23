@@ -1,6 +1,7 @@
 """Constants for the crosstalk Rabi experiment."""
 
 DEFAULT_DATA_DIR = "./data/"
+DEFAULT_IMAGES_DIR = "./images/"
 DEFAULT_CONFIG_DIR = "./crosstalk_rabi_config"
 SAVE_FILENAME = "CrosstalkRabiExperiment"
 
