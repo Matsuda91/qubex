@@ -78,6 +78,7 @@ PARAMS_MAP = {
     "qubit_qubit_coupling_strength": ("qubit_qubit_coupling_strength", "props"),
     "resonator_external_linewidth": ("external_loss_rate", "props"),
     "resonator_internal_linewidth": ("internal_loss_rate", "props"),
+    "thermal_excitation_probability": ("thermal_excitation_probability", "props"),
 }
 
 QUBIT_KEYED_PARAMS = frozenset(
