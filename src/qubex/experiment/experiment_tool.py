@@ -639,6 +639,64 @@ def print_chip_info(
                     save_image=save_image,
                     image_name="zx90_gate_fidelity",
                 )
+        if "purcell_filter_frequency" in info_type:
+            if values := loader.load_param_data("purcell_filter_frequency"):
+                graph.plot_lattice_data(
+                    title="Purcell filter frequency (GHz)",
+                    values=list(values.values()),
+                    texts=[
+                        f"{qubit}<br>{value:.3f}<br>GHz" if _is_valid(value) else "N/A"
+                        for qubit, value in values.items()
+                    ],
+                    hovertexts=[
+                        f"{qubit}: {value * 1e3:.3f} MHz"
+                        if _is_valid(value)
+                        else f"{qubit}: N/A"
+                        for qubit, value in values.items()
+                    ],
+                    save_image=save_image,
+                    image_name="purcell_filter_frequency",
+                )
+        if "resonator_purcell_filter_coupling" in info_type:
+            if values := loader.load_param_data("resonator_purcell_filter_coupling"):
+                graph.plot_lattice_data(
+                    title="Resonator-Purcell filter coupling (MHz)",
+                    values=list(values.values()),
+                    texts=[
+                        f"{qubit}<br>{value * 1e3:.1f}<br>MHz"
+                        if _is_valid(value)
+                        else "N/A"
+                        for qubit, value in values.items()
+                    ],
+                    hovertexts=[
+                        f"{qubit}: {value * 1e3:.1f} MHz"
+                        if _is_valid(value)
+                        else f"{qubit}: N/A"
+                        for qubit, value in values.items()
+                    ],
+                    save_image=save_image,
+                    image_name="resonator_purcell_filter_coupling",
+                )
+        if "purcell_filter_external_linewidth" in info_type:
+            if values := loader.load_param_data("purcell_filter_external_linewidth"):
+                graph.plot_lattice_data(
+                    title="Purcell filter external linewidth (MHz)",
+                    values=list(values.values()),
+                    texts=[
+                        f"{qubit}<br>{value * 1e3:.1f}<br>MHz"
+                        if _is_valid(value)
+                        else "N/A"
+                        for qubit, value in values.items()
+                    ],
+                    hovertexts=[
+                        f"{qubit}: {value * 1e3:.1f} MHz"
+                        if _is_valid(value)
+                        else f"{qubit}: N/A"
+                        for qubit, value in values.items()
+                    ],
+                    save_image=save_image,
+                    image_name="purcell_filter_external_linewidth",
+                )
 
     except Exception:
         logger.exception("Error occurred while printing chip info")
