@@ -78,6 +78,9 @@ PARAMS_MAP = {
     "qubit_qubit_coupling_strength": ("qubit_qubit_coupling_strength", "props"),
     "resonator_external_linewidth": ("external_loss_rate", "props"),
     "resonator_internal_linewidth": ("internal_loss_rate", "props"),
+    "resonator_purcell_filter_coupling": ("resonator_purcell_filter_coupling", "props"),
+    "purcell_filter_frequency": ("purcell_filter_frequency", "props"),
+    "purcell_filter_external_linewidth": ("purcell_filter_external_linewidth", "props"),
     "thermal_excitation_probability": ("thermal_excitation_probability", "props"),
 }
 
