@@ -205,7 +205,7 @@ def measure_cr_crosstalk(
             initial_state={control_qubit: control_state},
             n_shots=n_shots,
             shot_interval=shot_interval,
-            reset_awg_and_capunits=False,
+            reset_awg_and_capunits=True,
             plot=False,
         )
         control_states.append(np.array(result[control_qubit]))
