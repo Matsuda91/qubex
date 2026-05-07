@@ -147,7 +147,7 @@ def _invalid_target_frequency_difference(
         )
 
 
-def _invalid_message_for_test(
+def _invalid_message_for_frequency_group(
     drive_target: str,
     measure_target: str,
 ) -> None:
@@ -415,7 +415,7 @@ def measure_crosstalk_rabi_experiment(
         )
     else:
         try:
-            _invalid_message_for_test(
+            _invalid_message_for_frequency_group(
                 drive_target=drive_target,
                 measure_target=measure_target,
             )
