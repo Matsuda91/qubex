@@ -2,6 +2,7 @@
 
 import warnings
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
@@ -16,6 +17,8 @@ from qubex.experiment.models.experiment_result import (
     SweepData,
 )
 from qubex.experiment.models.result import Result
+from qubex.system import MixingUtil
+from qubex.system.quel1.quel1_system_constants import CNCO_CENTER_CTRL_HZ
 
 from .crosstalk_rabi_constants import (
     DEFAULT_AMPLITUDE_FOR_MEASURE_TARGET_RABI,
@@ -87,10 +90,7 @@ def _invalid_qubit_pairs(drive_target: str, measure_target: str) -> None:
 
 def _invalid_qubit_with_amp(ex: qx.Experiment, target: str) -> None:
 
-    _message = (
-        f"crosstalk_rabi_experiment currently does not support target {target} on {ex.chip_id} due to amplitude control issues. "
-        "Please refer to the experiment documentation for details."
-    )
+    _message = f"This exclude  {target} on {ex.chip_id} because the control line has an amplifier."
 
     if "144" in ex.chip_id:
         if target in QUBITS_WITH_CONTROL_LINE_AMP_IN_144Q:
@@ -120,16 +120,15 @@ def _invalid_target_frequency_difference(
         )
 
 
-def _invalid_message_for_frequency_group(
+def _invalid_message_for_cr_pairs(
+    ex: qx.Experiment,
     drive_target: str,
     measure_target: str,
 ) -> None:
-    if True:
-        raise ValueError(
-            "crosstalk_rabi_experiment currently supports only drive_target "
-            "and measure_target in the same high/low group. "
-            f"Got drive_target={drive_target}, measure_target={measure_target}."
-        )
+    spectators = ex.get_spectators(qubit=drive_target, in_same_mux=False)
+    for spectator in spectators:
+        if measure_target == spectator.label:
+            raise ValueError("Drive target and Measure target belong to cr pairs.")
 
 
 def _control_amplitude_or_raise(
@@ -159,6 +158,34 @@ def _get_frequency_group(
     }
 
 
+def _get_backend_settings(
+    ex: qx.Experiment,
+    target: str,
+) -> dict[str, Any]:
+    control_box = ex.ctx.experiment_system.get_control_box_for_qubit(target)
+
+    ssb = control_box.traits.ctrl_ssb
+    cnco_center = CNCO_CENTER_CTRL_HZ
+    f_target = ex.targets[target].frequency
+    lo, cnco, _ = MixingUtil.calc_lo_cnco(
+        f=f_target,
+        cnco_center=cnco_center,
+        ssb=ssb,
+    )
+    fnco, _ = MixingUtil.calc_fnco(
+        f=f_target,
+        ssb=ssb,
+        lo=lo,
+        cnco=cnco,
+    )
+    return {
+        "qubit": target,
+        "lo_freq": lo,
+        "cnco_freq": cnco,
+        "fnco_freq": fnco,
+    }
+
+
 def _crosstalk_rabi_experiment(
     ex: qx.Experiment,
     *,
@@ -183,9 +210,9 @@ def _crosstalk_rabi_experiment(
         T = int(1 / crosstalk_rabi_freq)
         dt = max(
             DEFAULT_SAMPLING_PERIOD,
-            int(T / 10) // DEFAULT_SAMPLING_PERIOD * DEFAULT_SAMPLING_PERIOD,
+            int(T / 4) // DEFAULT_SAMPLING_PERIOD * DEFAULT_SAMPLING_PERIOD,
         )
-        crosstalk_rabi_time_range = np.arange(0, int(5 * T), dt)
+        crosstalk_rabi_time_range = np.arange(0, int(8 * T), dt)
 
     reference_points = ex.obtain_reference_points(
         targets=[drive_target, measure_target], n_shots=1024
@@ -339,6 +366,34 @@ def _measure_crosstalk_rabi_experiment(
     return pair_record
 
 
+def _return_invalid_pair_result(
+    drive_target: str,
+    measure_target: str,
+    warning_message: str,
+    status: str,
+) -> Result:
+    """Helper function to build a Result for invalid pairs."""
+    summary = CrosstalkRabiPairSummary(
+        drive_target=drive_target,
+        measure_target=measure_target,
+        status=status,
+        warning=warning_message,
+    )
+    pair_record = CrosstalkRabiRecord(
+        drive_target=drive_target,
+        measure_target=measure_target,
+        pair_summary=summary,
+    )
+    pair_record.save()
+    warnings.warn(warning_message, stacklevel=2)
+    return Result(
+        data={
+            "summary": summary,
+            "record": pair_record,
+        }
+    )
+
+
 def measure_crosstalk_rabi_experiment(
     ex: qx.Experiment,
     *,
@@ -358,25 +413,25 @@ def measure_crosstalk_rabi_experiment(
             measure_target,
         )
     except ValueError as exc:
-        summary = CrosstalkRabiPairSummary(
+        return _return_invalid_pair_result(
             drive_target=drive_target,
             measure_target=measure_target,
-            status="not_crosstalk_pair",
-            warning=str(exc),
+            warning_message=str(exc),
+            status="no_crosstalk_pair",
         )
-        pair_record = CrosstalkRabiRecord(
-            drive_target=drive_target,
-            measure_target=measure_target,
-            pair_summary=summary,
-        )
-        pair_record.save()
-        warnings.warn(str(exc), stacklevel=2)
-        return Result(
-            data={
-                "summary": summary,
-                "record": pair_record,
-            }
-        )
+    if invalidate_qubit_with_amp:
+        try:
+            _invalid_qubit_with_amp(
+                ex,
+                drive_target,
+            )
+        except ValueError as exc:
+            return _return_invalid_pair_result(
+                drive_target=drive_target,
+                measure_target=measure_target,
+                warning_message=str(exc),
+                status="skipped",
+            )
 
     frequency_group = _get_frequency_group(
         drive_target,
@@ -385,35 +440,17 @@ def measure_crosstalk_rabi_experiment(
 
     if frequency_group["drive_target"] == frequency_group["measure_target"]:
         try:
-            if invalidate_qubit_with_amp:
-                _invalid_qubit_with_amp(
-                    ex,
-                    drive_target,
-                )
             _invalid_target_frequency_difference(
                 ex,
                 drive_target,
                 measure_target,
             )
         except ValueError as exc:
-            summary = CrosstalkRabiPairSummary(
+            return _return_invalid_pair_result(
                 drive_target=drive_target,
                 measure_target=measure_target,
+                warning_message=str(exc),
                 status="skipped",
-                warning=str(exc),
-            )
-            pair_record = CrosstalkRabiRecord(
-                drive_target=drive_target,
-                measure_target=measure_target,
-                pair_summary=summary,
-            )
-            pair_record.save()
-            warnings.warn(str(exc), stacklevel=2)
-            return Result(
-                data={
-                    "summary": summary,
-                    "record": pair_record,
-                }
             )
 
         return _measure_crosstalk_rabi_experiment(
@@ -428,27 +465,38 @@ def measure_crosstalk_rabi_experiment(
         )
     else:
         try:
-            _invalid_message_for_frequency_group(
-                drive_target=drive_target,
-                measure_target=measure_target,
+            _invalid_message_for_cr_pairs(
+                ex,
+                drive_target,
+                measure_target,
             )
         except ValueError as exc:
-            summary = CrosstalkRabiPairSummary(
+            return _return_invalid_pair_result(
                 drive_target=drive_target,
                 measure_target=measure_target,
+                warning_message=str(exc),
                 status="skipped",
-                warning=str(exc),
             )
-            pair_record = CrosstalkRabiRecord(
+
+        backend_settings = _get_backend_settings(
+            ex=ex,
+            target=measure_target,
+        )
+        with ex.ctx.system_manager.modified_backend_settings(
+            label=backend_settings["qubit"],
+            lo_freq=backend_settings["lo_freq"],
+            cnco_freq=backend_settings["cnco_freq"],
+            fnco_freq=backend_settings["fnco_freq"],
+        ):
+            ex.ctx.reset_awg_and_capunits(qubits=[drive_target, measure_target])
+
+            return _measure_crosstalk_rabi_experiment(
+                ex=ex,
                 drive_target=drive_target,
                 measure_target=measure_target,
-                pair_summary=summary,
-            )
-            pair_record.save()
-            warnings.warn(str(exc), stacklevel=2)
-            return Result(
-                data={
-                    "summary": summary,
-                    "record": pair_record,
-                }
+                crosstalk_rabi_time_range=crosstalk_rabi_time_range,
+                amplitude_for_drive_target_rabi=amplitude_for_drive_target_rabi,
+                amplitude_for_measure_target_rabi=amplitude_for_measure_target_rabi,
+                plot_rabi=plot_rabi,
+                plot_fit=plot_fit,
             )
