@@ -85,33 +85,6 @@ def _invalid_qubit_pairs(drive_target: str, measure_target: str) -> None:
         raise ValueError("Drive and measure targets must be different.")
 
 
-def _control_amplitude_or_raise(
-    ex: qx.Experiment,
-    target: str,
-) -> float:
-    amplitude = ex.params.control_amplitude.get(target)
-    if amplitude is None:
-        raise ValueError(f"Control amplitude is not configured for {target}.")
-    return amplitude
-
-
-def _get_frequency_group(
-    drive_target: str,
-    measure_target: str,
-) -> dict[str, str]:
-    """Validate that both targets belong to the same high/low group."""
-    drive_target_type = (
-        FrequencyType.HIGH if is_high(drive_target) else FrequencyType.LOW
-    )
-    measure_target_type = (
-        FrequencyType.HIGH if is_high(measure_target) else FrequencyType.LOW
-    )
-    return {
-        "drive_target": drive_target_type,
-        "measure_target": measure_target_type,
-    }
-
-
 def _invalid_qubit_with_amp(ex: qx.Experiment, target: str) -> None:
 
     _message = (
@@ -159,6 +132,33 @@ def _invalid_message_for_frequency_group(
         )
 
 
+def _control_amplitude_or_raise(
+    ex: qx.Experiment,
+    target: str,
+) -> float:
+    amplitude = ex.params.control_amplitude.get(target)
+    if amplitude is None:
+        raise ValueError(f"Control amplitude is not configured for {target}.")
+    return amplitude
+
+
+def _get_frequency_group(
+    drive_target: str,
+    measure_target: str,
+) -> dict[str, str]:
+    """Validate that both targets belong to the same high/low group."""
+    drive_target_type = (
+        FrequencyType.HIGH if is_high(drive_target) else FrequencyType.LOW
+    )
+    measure_target_type = (
+        FrequencyType.HIGH if is_high(measure_target) else FrequencyType.LOW
+    )
+    return {
+        "drive_target": drive_target_type,
+        "measure_target": measure_target_type,
+    }
+
+
 def _crosstalk_rabi_experiment(
     ex: qx.Experiment,
     *,
@@ -176,7 +176,6 @@ def _crosstalk_rabi_experiment(
         amplitude_for_drive_target_rabi = _control_amplitude_or_raise(ex, drive_target)
     if amplitude_for_measure_target_rabi is None:
         amplitude_for_measure_target_rabi = DEFAULT_AMPLITUDE_FOR_MEASURE_TARGET_RABI
-    measure_target_control_amplitude = _control_amplitude_or_raise(ex, measure_target)
 
     if crosstalk_rabi_time_range is None:
         max_rabi_freq = ex.calc_rabi_rate(target=drive_target, control_amplitude=1.0)
@@ -191,13 +190,14 @@ def _crosstalk_rabi_experiment(
     reference_points = ex.obtain_reference_points(
         targets=[drive_target, measure_target], n_shots=1024
     )["iq"]
-
     results_rabi_jj = ex.obtain_rabi_params(
         targets=[drive_target, measure_target],
         time_range=np.asarray(DEFAULT_RABI_TIME_RANGE),
         amplitudes={
             drive_target: amplitude_for_drive_target_rabi,  # for crosstalk evaluation
-            measure_target: measure_target_control_amplitude,  # for normalization.
+            measure_target: _control_amplitude_or_raise(
+                ex, measure_target
+            ),  # for normalization.
         },
         plot=plot_rabi_jj,
     )
@@ -266,7 +266,7 @@ def _measure_crosstalk_rabi_experiment(
     amplitude_for_measure_target_rabi: float | None = None,
     plot_rabi: bool = True,
     plot_fit: bool = True,
-) -> None:
+) -> CrosstalkRabiRecord:
     """Run the measurement, fit, and persistence flow for one crosstalk pair."""
     if amplitude_for_drive_target_rabi is None:
         amplitude_for_drive_target_rabi = _control_amplitude_or_raise(ex, drive_target)
@@ -336,6 +336,7 @@ def _measure_crosstalk_rabi_experiment(
         kj_result_file=kj_result_file,
     )
     _ = pair_record.save()
+    return pair_record
 
 
 def measure_crosstalk_rabi_experiment(
@@ -349,7 +350,7 @@ def measure_crosstalk_rabi_experiment(
     invalidate_qubit_with_amp: bool = True,
     plot_rabi: bool = True,
     plot_fit: bool = True,
-) -> None:
+) -> Result:
     """Run the crosstalk Rabi experiment for targets in the same frequency group."""
     try:
         _invalid_qubit_pairs(
@@ -368,8 +369,14 @@ def measure_crosstalk_rabi_experiment(
             measure_target=measure_target,
             pair_summary=summary,
         )
-        _ = pair_record.save()
+        pair_record.save()
         warnings.warn(str(exc), stacklevel=2)
+        return Result(
+            data={
+                "summary": summary,
+                "record": pair_record,
+            }
+        )
 
     frequency_group = _get_frequency_group(
         drive_target,
@@ -400,10 +407,16 @@ def measure_crosstalk_rabi_experiment(
                 measure_target=measure_target,
                 pair_summary=summary,
             )
-            _ = pair_record.save()
+            pair_record.save()
             warnings.warn(str(exc), stacklevel=2)
+            return Result(
+                data={
+                    "summary": summary,
+                    "record": pair_record,
+                }
+            )
 
-        _measure_crosstalk_rabi_experiment(
+        return _measure_crosstalk_rabi_experiment(
             ex=ex,
             drive_target=drive_target,
             measure_target=measure_target,
@@ -431,5 +444,11 @@ def measure_crosstalk_rabi_experiment(
                 measure_target=measure_target,
                 pair_summary=summary,
             )
-            _ = pair_record.save()
+            pair_record.save()
             warnings.warn(str(exc), stacklevel=2)
+            return Result(
+                data={
+                    "summary": summary,
+                    "record": pair_record,
+                }
+            )
