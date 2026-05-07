@@ -12,7 +12,7 @@ SAVE_DESCRIPTION_TEMPLATE = lambda drive_target, measure_target: (
     f"Rabi data for drive_target={drive_target} and measure_target={measure_target}"
 )
 
-DEFAULT_CROSSTALK_RATIO = 0.01
+DEFAULT_CROSSTALK_RATIO = 0.005
 DEFAULT_SAMPLING_PERIOD = 2
 QUBITS_WITH_CONTROL_LINE_AMP_IN_144Q = [
     "Q024",
