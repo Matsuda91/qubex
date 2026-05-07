@@ -18,7 +18,7 @@ from qubex.experiment.models.experiment_result import (
 from qubex.experiment.models.result import Result
 
 from .crosstalk_rabi_constants import (
-    DEFAULT_CROSSTALK_RABI_TIME_RANGE,
+    DEFAULT_AMPLITUDE_FOR_MEASURE_TARGET_RABI,
     DEFAULT_CROSSTALK_RATIO,
     DEFAULT_SAMPLING_PERIOD,
     HIGH_INDEX,
@@ -44,7 +44,7 @@ class CrosstalkRabiData(RabiData):
     """RabiData with explicit drive-target context for crosstalk experiments."""
 
     drive_target: str
-    drive_amplitude_hw: float
+    drive_amplitude_hw: float | None = None
     reference_point: complex | None = None
 
     @property
@@ -83,6 +83,16 @@ def is_low(target: str) -> bool:
 def _invalid_qubit_pairs(drive_target: str, measure_target: str) -> None:
     if drive_target == measure_target:
         raise ValueError("Drive and measure targets must be different.")
+
+
+def _control_amplitude_or_raise(
+    ex: qx.Experiment,
+    target: str,
+) -> float:
+    amplitude = ex.params.control_amplitude.get(target)
+    if amplitude is None:
+        raise ValueError(f"Control amplitude is not configured for {target}.")
+    return amplitude
 
 
 def _get_frequency_group(
@@ -154,13 +164,19 @@ def _crosstalk_rabi_experiment(
     *,
     drive_target: str,
     measure_target: str,
-    crosstalk_rabi_time_range: NDArray | None = None,
     amplitude_for_drive_target_rabi: float | None = None,
     amplitude_for_measure_target_rabi: float | None = None,
+    crosstalk_rabi_time_range: NDArray | None = None,
     ramp_time: int = HPI_DURATION,
     plot_rabi_jj: bool = True,
     plot_rabi_kj: bool = True,
 ) -> Result:
+
+    if amplitude_for_drive_target_rabi is None:
+        amplitude_for_drive_target_rabi = _control_amplitude_or_raise(ex, drive_target)
+    if amplitude_for_measure_target_rabi is None:
+        amplitude_for_measure_target_rabi = DEFAULT_AMPLITUDE_FOR_MEASURE_TARGET_RABI
+    measure_target_control_amplitude = _control_amplitude_or_raise(ex, measure_target)
 
     if crosstalk_rabi_time_range is None:
         max_rabi_freq = ex.calc_rabi_rate(target=drive_target, control_amplitude=1.0)
@@ -170,14 +186,7 @@ def _crosstalk_rabi_experiment(
             DEFAULT_SAMPLING_PERIOD,
             int(T / 10) // DEFAULT_SAMPLING_PERIOD * DEFAULT_SAMPLING_PERIOD,
         )
-        crosstalk_rabi_time_range = np.arange(0, int(3 * T), dt)
-
-    if amplitude_for_drive_target_rabi is None:
-        amplitude_for_drive_target_rabi = ex.params.control_amplitude.get(drive_target)
-    if amplitude_for_measure_target_rabi is None:
-        amplitude_for_measure_target_rabi = ex.params.control_amplitude.get(
-            measure_target
-        )
+        crosstalk_rabi_time_range = np.arange(0, int(5 * T), dt)
 
     reference_points = ex.obtain_reference_points(
         targets=[drive_target, measure_target], n_shots=1024
@@ -188,9 +197,7 @@ def _crosstalk_rabi_experiment(
         time_range=np.asarray(DEFAULT_RABI_TIME_RANGE),
         amplitudes={
             drive_target: amplitude_for_drive_target_rabi,  # for crosstalk evaluation
-            measure_target: ex.params.control_amplitude.get(
-                measure_target
-            ),  # for normalization.
+            measure_target: measure_target_control_amplitude,  # for normalization.
         },
         plot=plot_rabi_jj,
     )
@@ -201,7 +208,7 @@ def _crosstalk_rabi_experiment(
         time_range=np.asarray(DEFAULT_RABI_TIME_RANGE),
         rabi_param=results_rabi_jj.data[drive_target].rabi_param,
         drive_target=drive_target,
-        drive_amplitude_hw=ex.params.control_amplitude.get(drive_target),
+        drive_amplitude_hw=amplitude_for_drive_target_rabi,
     )
 
     def crosstalk_rabi_sequence(T: int):
@@ -234,6 +241,7 @@ def _crosstalk_rabi_experiment(
         time_range=effective_time_range,
         rabi_param=results_rabi_jj.data[measure_target].rabi_param,
         drive_target=drive_target,
+        drive_amplitude_hw=amplitude_for_measure_target_rabi,
     )
 
     return Result(
@@ -254,23 +262,27 @@ def _measure_crosstalk_rabi_experiment(
     drive_target: str,
     measure_target: str,
     crosstalk_rabi_time_range: NDArray | None = None,
-    drive_amplitude: float | None = None,
+    amplitude_for_drive_target_rabi: float | None = None,
+    amplitude_for_measure_target_rabi: float | None = None,
     plot_rabi: bool = True,
     plot_fit: bool = True,
-) -> Result:
+) -> None:
     """Run the measurement, fit, and persistence flow for one crosstalk pair."""
-    if crosstalk_rabi_time_range is None:
-        crosstalk_rabi_time_range = np.asarray(DEFAULT_CROSSTALK_RABI_TIME_RANGE)
+    if amplitude_for_drive_target_rabi is None:
+        amplitude_for_drive_target_rabi = _control_amplitude_or_raise(ex, drive_target)
+    if amplitude_for_measure_target_rabi is None:
+        amplitude_for_measure_target_rabi = DEFAULT_AMPLITUDE_FOR_MEASURE_TARGET_RABI
 
-    if drive_amplitude is None:
-        drive_amplitude = 1.2 * ex.params.control_amplitude[drive_target]
+    xt_jj_label = f"{drive_target}-{drive_target}"
+    xt_kj_label = f"{measure_target}-{drive_target}"
 
     result = _crosstalk_rabi_experiment(
         ex=ex,
         drive_target=drive_target,
         measure_target=measure_target,
         crosstalk_rabi_time_range=crosstalk_rabi_time_range,
-        drive_amplitude=drive_amplitude,
+        amplitude_for_drive_target_rabi=amplitude_for_drive_target_rabi,
+        amplitude_for_measure_target_rabi=amplitude_for_measure_target_rabi,
         plot_rabi_jj=plot_rabi,
         plot_rabi_kj=plot_rabi,
     )
@@ -294,11 +306,13 @@ def _measure_crosstalk_rabi_experiment(
         measure_target=measure_target,
         fit_result_jj=fit_result_jj,
         fit_result_kj=fit_result_kj,
+        amplitude_for_drive_target_rabi=amplitude_for_drive_target_rabi,
+        amplitude_for_measure_target_rabi=amplitude_for_measure_target_rabi,
     )
 
     jj_result_file: str | None = None
     if fit_result_jj.status == FitStatus.SUCCESS:
-        result_jj = ExperimentResult(data={measure_target: rabi_data_jj})
+        result_jj = ExperimentResult(data={xt_jj_label: rabi_data_jj})
         saved_jj = result_jj.save(
             name=f"{SAVE_FILENAME}",
             description=SAVE_DESCRIPTION_TEMPLATE(drive_target, measure_target),
@@ -307,7 +321,7 @@ def _measure_crosstalk_rabi_experiment(
 
     kj_result_file: str | None = None
     if fit_result_kj.status == FitStatus.SUCCESS:
-        result_kj = ExperimentResult(data={measure_target: rabi_data_kj})
+        result_kj = ExperimentResult(data={xt_kj_label: rabi_data_kj})
         saved_kj = result_kj.save(
             name=f"{SAVE_FILENAME}",
             description=SAVE_DESCRIPTION_TEMPLATE(drive_target, measure_target),
@@ -321,7 +335,7 @@ def _measure_crosstalk_rabi_experiment(
         jj_result_file=jj_result_file,
         kj_result_file=kj_result_file,
     )
-    saved_pair_record = pair_record.save()
+    _ = pair_record.save()
 
 
 def measure_crosstalk_rabi_experiment(
@@ -330,14 +344,13 @@ def measure_crosstalk_rabi_experiment(
     drive_target: str,
     measure_target: str,
     crosstalk_rabi_time_range: NDArray | None = None,
-    drive_amplitude: float | None = None,
+    amplitude_for_drive_target_rabi: float | None = None,
+    amplitude_for_measure_target_rabi: float | None = None,
+    invalidate_qubit_with_amp: bool = True,
     plot_rabi: bool = True,
     plot_fit: bool = True,
-) -> Result:
+) -> None:
     """Run the crosstalk Rabi experiment for targets in the same frequency group."""
-    if crosstalk_rabi_time_range is None:
-        crosstalk_rabi_time_range = np.asarray(DEFAULT_CROSSTALK_RABI_TIME_RANGE)
-
     try:
         _invalid_qubit_pairs(
             drive_target,
@@ -355,19 +368,9 @@ def measure_crosstalk_rabi_experiment(
             measure_target=measure_target,
             pair_summary=summary,
         )
-        saved_pair_record = pair_record.save()
+        _ = pair_record.save()
         warnings.warn(str(exc), stacklevel=2)
-        return Result(
-            data={
-                "drive_target": drive_target,
-                "measure_target": measure_target,
-                "pair_summary": summary,
-                "pair_record": pair_record,
-                "pair_record_file": saved_pair_record.file_name,
-                "warning": str(exc),
-                "status": "not_crosstalk_pair",
-            }
-        )
+
     frequency_group = _get_frequency_group(
         drive_target,
         measure_target,
@@ -375,6 +378,11 @@ def measure_crosstalk_rabi_experiment(
 
     if frequency_group["drive_target"] == frequency_group["measure_target"]:
         try:
+            if invalidate_qubit_with_amp:
+                _invalid_qubit_with_amp(
+                    ex,
+                    drive_target,
+                )
             _invalid_target_frequency_difference(
                 ex,
                 drive_target,
@@ -392,25 +400,16 @@ def measure_crosstalk_rabi_experiment(
                 measure_target=measure_target,
                 pair_summary=summary,
             )
-            saved_pair_record = pair_record.save()
+            _ = pair_record.save()
             warnings.warn(str(exc), stacklevel=2)
-            return Result(
-                data={
-                    "drive_target": drive_target,
-                    "measure_target": measure_target,
-                    "pair_summary": summary,
-                    "pair_record": pair_record,
-                    "pair_record_file": saved_pair_record.file_name,
-                    "warning": str(exc),
-                    "status": "skipped",
-                }
-            )
-        return _measure_crosstalk_rabi_experiment(
+
+        _measure_crosstalk_rabi_experiment(
             ex=ex,
             drive_target=drive_target,
             measure_target=measure_target,
             crosstalk_rabi_time_range=crosstalk_rabi_time_range,
-            drive_amplitude=drive_amplitude,
+            amplitude_for_drive_target_rabi=amplitude_for_drive_target_rabi,
+            amplitude_for_measure_target_rabi=amplitude_for_measure_target_rabi,
             plot_rabi=plot_rabi,
             plot_fit=plot_fit,
         )
@@ -432,16 +431,5 @@ def measure_crosstalk_rabi_experiment(
                 measure_target=measure_target,
                 pair_summary=summary,
             )
-            saved_pair_record = pair_record.save()
+            _ = pair_record.save()
             warnings.warn(str(exc), stacklevel=2)
-            return Result(
-                data={
-                    "drive_target": drive_target,
-                    "measure_target": measure_target,
-                    "pair_summary": summary,
-                    "pair_record": pair_record,
-                    "pair_record_file": saved_pair_record.file_name,
-                    "warning": str(exc),
-                    "status": "skipped",
-                }
-            )

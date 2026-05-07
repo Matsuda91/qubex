@@ -28,7 +28,7 @@ class CrosstalkRabiRecord:
     def save(
         self,
         data_dir: Path | str | None = None,
-    ) -> ExperimentRecord[CrosstalkRabiRecord]:
+    ) -> None:
         """Persist this pair-level record using the experiment record store."""
         record = ExperimentRecord(
             data=self,
@@ -39,7 +39,6 @@ class CrosstalkRabiRecord:
             ),
         )
         record.save(data_path=str(data_dir) if data_dir is not None else None)
-        return record
 
     @classmethod
     def load(

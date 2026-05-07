@@ -128,7 +128,7 @@ class CrosstalkRabiCollection:
         self,
         title: str = "Crosstalk Rabi ratio matrix",
         save_figure: bool = False,
-    ) -> go.Figure:
+    ) -> None:
         """Plot the stored crosstalk ratio matrix."""
         fig = self.matrix.plot_ratio_matrix(title=title)
         self._apply_record_hover(fig, include_ratio=True)
@@ -145,7 +145,7 @@ class CrosstalkRabiCollection:
         self,
         title: str = "Crosstalk Rabi acquisition status",
         save_figure: bool = False,
-    ) -> go.Figure:
+    ) -> None:
         """Plot the stored crosstalk acquisition-status matrix."""
         fig = self.matrix.plot_status_matrix(title=title)
         self._apply_record_hover(fig, include_ratio=False)
@@ -224,6 +224,43 @@ class CrosstalkRabiCollection:
         if not isinstance(saved_result, ExperimentResult):
             raise TypeError(f"Expected ExperimentResult, got {type(saved_result)}")
         return saved_result
+
+    def find_result_fit(
+        self,
+        drive_target: str,
+        measure_target: str,
+        *,
+        result_kind: Literal["kj", "jj"] = "kj",
+        is_damped: bool = True,
+    ) -> None:
+        """Load and fit the saved ExperimentResult for one drive/measure pair."""
+        if result_kind == "jj":
+            target = f"{drive_target}-{drive_target}"
+        elif result_kind == "kj":
+            target = f"{measure_target}-{drive_target}"
+
+        record = self._find_record(
+            drive_target=drive_target,
+            measure_target=measure_target,
+        )
+
+        result = self.find_result(
+            drive_target=drive_target,
+            measure_target=measure_target,
+            result_kind=result_kind,
+        )
+        fit_result = result.fit(
+            is_damped=is_damped,
+            plot=False,
+        )
+        print(fit_result)
+        figure: go.Figure = fit_result[target].get_figure()
+        title = figure.layout.title.to_plotly_json()
+        title["subtitle"] = {
+            "text": f"Hardware Amplitude jj: {record.pair_summary.amplitude_hw_for_jj}, kj: {record.pair_summary.amplitude_hw_for_kj}",
+        }
+        figure.update_layout(title=title)
+        figure.show()
 
     def plot_rabi(
         self,

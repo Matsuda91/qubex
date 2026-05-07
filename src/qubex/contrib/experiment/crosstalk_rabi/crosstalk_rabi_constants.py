@@ -12,8 +12,18 @@ SAVE_DESCRIPTION_TEMPLATE = lambda drive_target, measure_target: (
     f"Rabi data for drive_target={drive_target} and measure_target={measure_target}"
 )
 
-DEFAULT_CROSSTALK_RABI_TIME_RANGE = range(0, 40001, 1000)
 DEFAULT_CROSSTALK_RATIO = 0.01
 DEFAULT_SAMPLING_PERIOD = 2
-QUBITS_WITH_CONTROL_LINE_AMP_IN_144Q = ["Q031", "Q036", "Q039", "Q056"]
+QUBITS_WITH_CONTROL_LINE_AMP_IN_144Q = [
+    "Q024",
+    "Q028",
+    "Q031",
+    "Q032",
+    "Q036",
+    "Q039",
+    "Q044",
+    "Q048",
+]
 QUBITS_WITH_CONTROL_LINE_AMP_IN_64Q = []
+
+DEFAULT_AMPLITUDE_FOR_MEASURE_TARGET_RABI = 1.0
