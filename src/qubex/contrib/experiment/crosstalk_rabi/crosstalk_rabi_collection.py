@@ -79,10 +79,16 @@ class CrosstalkRabiCollection:
     def load_records(
         cls,
         *,
+        chip_id: str,
         data_dir: Path | str = DEFAULT_DATA_DIR,
     ) -> CrosstalkRabiCollection:
         """Load a collection by rebuilding the matrix from saved pair records."""
-        targets = [f"Q{i:03d}" for i in range(144)]
+        if "Q64" in chip_id:
+            n = 64
+        else:
+            n = 144
+
+        targets = [f"Q{i:03d}" for i in range(int(n))]
         base_path = Path(data_dir)
         records = CrosstalkRabiRecord.list(data_dir=base_path)
         return cls(
