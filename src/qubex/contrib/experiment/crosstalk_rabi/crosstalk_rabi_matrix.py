@@ -14,10 +14,13 @@ import plotly.graph_objects as go
 import qxvisualizer as viz
 from numpy.typing import NDArray
 
+from .crosstalk_rabi_constants import HIGH_INDEX, LOW_INDEX
 from .crosstalk_rabi_result import CrosstalkRabiPairSummary
 from .crosstalk_rabi_status import (
     STATUS_BY_SUMMARY,
+    STATUS_FIT_FAILED,
     STATUS_LABELS,
+    STATUS_MEASURED,
     STATUS_NOT_CROSSTALK_PAIR,
     STATUS_NOT_MEASURED,
     STATUS_SKIPPED,
@@ -47,11 +50,31 @@ def _matrix_figure_size(target_count: int) -> int:
     return int(np.clip(420 + 12 * max(target_count, 1), 720, 1800))
 
 
+def _target_frequency_group(target: str) -> Literal["Low", "High"]:
+    if not target.startswith("Q"):
+        raise ValueError(f"Target must start with 'Q': {target}")
+    target_mod = int(target[1:]) % 4
+    if target_mod in LOW_INDEX:
+        return "Low"
+    if target_mod in HIGH_INDEX:
+        return "High"
+    raise ValueError(f"Unsupported target frequency group: {target}")
+
+
 def _finite_z_range(values: NDArray[np.float64]) -> tuple[float | None, float | None]:
     finite_values = values[np.isfinite(values)]
     if finite_values.size == 0:
         return None, None
     return float(np.min(finite_values)), float(np.max(finite_values))
+
+
+def _title_with_subtitle(title: str, subtitle: str) -> dict[str, object]:
+    return {"text": title, "subtitle": {"text": subtitle}}
+
+
+def _format_group_values(values: dict[str, str]) -> str:
+    group_order = ("Low-Low", "Low-High", "High-Low", "High-High")
+    return ", ".join(f"{group}: {values[group]}" for group in group_order)
 
 
 def _load_matrix_cache(path: Path | str) -> CrosstalkRabiMatrix:
@@ -165,6 +188,65 @@ class CrosstalkRabiMatrix:
                 )
         return rows
 
+    def _status_summary_subtitle(self) -> str:
+        group_counts = {
+            "Low-Low": [0, 0],
+            "Low-High": [0, 0],
+            "High-Low": [0, 0],
+            "High-High": [0, 0],
+        }
+        counted_statuses = (STATUS_MEASURED, STATUS_FIT_FAILED)
+
+        for row, measure_target in enumerate(self.targets):
+            measure_group = _target_frequency_group(_canonical_target(measure_target))
+            for column, drive_target in enumerate(self.targets):
+                status = int(self.status_matrix[row, column])
+                if status not in counted_statuses:
+                    continue
+
+                drive_group = _target_frequency_group(_canonical_target(drive_target))
+                group = f"{measure_group}-{drive_group}"
+                group_counts[group][1] += 1
+                if status == STATUS_MEASURED:
+                    group_counts[group][0] += 1
+
+        summary: dict[str, str] = {}
+        for group, (success_count, total_count) in group_counts.items():
+            if total_count == 0:
+                summary[group] = "N/A (0/0)"
+                continue
+            rate = success_count / total_count * 100
+            summary[group] = f"{rate:.1f}% ({success_count}/{total_count})"
+        return "Measured rate measured/(fit_failed+measured): " + _format_group_values(
+            summary
+        )
+
+    def _ratio_summary_subtitle(self) -> str:
+        group_values = {
+            "Low-Low": [],
+            "Low-High": [],
+            "High-Low": [],
+            "High-High": [],
+        }
+
+        for row, measure_target in enumerate(self.targets):
+            measure_group = _target_frequency_group(_canonical_target(measure_target))
+            for column, drive_target in enumerate(self.targets):
+                ratio = self.r_matrix[row, column]
+                if not np.isfinite(ratio):
+                    continue
+
+                drive_group = _target_frequency_group(_canonical_target(drive_target))
+                group_values[f"{measure_group}-{drive_group}"].append(float(ratio))
+
+        summary: dict[str, str] = {}
+        for group, values in group_values.items():
+            if not values:
+                summary[group] = "N/A"
+                continue
+            summary[group] = f"{np.mean(values):.5g}"
+        return "Mean ratio: " + _format_group_values(summary)
+
     def plot_ratio_matrix(
         self,
         title: str = "Crosstalk Rabi ratio matrix",
@@ -218,7 +300,7 @@ class CrosstalkRabiMatrix:
             )
         )
         fig.update_layout(
-            title=title,
+            title=_title_with_subtitle(title, self._ratio_summary_subtitle()),
             width=figure_size,
             height=figure_size,
             xaxis_title="drive target j",
@@ -268,7 +350,7 @@ class CrosstalkRabiMatrix:
             )
         )
         fig.update_layout(
-            title=title,
+            title=_title_with_subtitle(title, self._status_summary_subtitle()),
             width=figure_size,
             height=figure_size,
             xaxis_title="drive target j",
