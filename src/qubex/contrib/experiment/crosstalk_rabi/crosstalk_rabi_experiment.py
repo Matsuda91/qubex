@@ -417,7 +417,7 @@ def measure_crosstalk_rabi_experiment(
             drive_target=drive_target,
             measure_target=measure_target,
             warning_message=str(exc),
-            status="no_crosstalk_pair",
+            status="not_crosstalk_pair",
         )
     if invalidate_qubit_with_amp:
         try:

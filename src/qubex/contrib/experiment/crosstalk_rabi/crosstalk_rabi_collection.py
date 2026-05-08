@@ -127,11 +127,12 @@ class CrosstalkRabiCollection:
     def plot_ratio_matrix(
         self,
         title: str = "Crosstalk Rabi ratio matrix",
+        mode: Literal["ratio", "dB"] = "dB",
         save_figure: bool = False,
     ) -> None:
         """Plot the stored crosstalk ratio matrix."""
-        fig = self.matrix.plot_ratio_matrix(title=title)
-        self._apply_record_hover(fig, include_ratio=True)
+        fig = self.matrix.plot_ratio_matrix(title=title, mode=mode)
+        self._apply_record_hover(fig, include_ratio=True, ratio_mode=mode)
         fig.show()
         if save_figure:
             now = datetime.now().strftime("%Y%m%d")
@@ -320,17 +321,30 @@ class CrosstalkRabiCollection:
             return pair_record.jj_result_file
         raise ValueError(f"Unsupported result_kind: {result_kind}")
 
-    def _apply_record_hover(self, fig: go.Figure, *, include_ratio: bool) -> None:
+    def _apply_record_hover(
+        self,
+        fig: go.Figure,
+        *,
+        include_ratio: bool,
+        ratio_mode: Literal["ratio", "dB"] = "ratio",
+    ) -> None:
         """Attach latest record metadata to matrix hover when record data is loaded."""
         if self._records is None or not fig.data:
             return
 
         fig.data[0].customdata = self._record_hover_customdata()
         if include_ratio:
+            if ratio_mode == "ratio":
+                ratio_hover = "r_kj=%{z:.5f}"
+            elif ratio_mode == "dB":
+                ratio_hover = "r_kj(dB)=%{z:.2f}"
+            else:
+                raise ValueError(f"Unsupported ratio_mode: {ratio_mode}")
+
             fig.data[0].hovertemplate = (
                 "measure=%{y}<br>"
                 "drive=%{x}<br>"
-                "r_kj=%{z:.5f}<br>"
+                f"{ratio_hover}<br>"
                 "status=%{customdata[0]}<br>"
                 "jj_fit_status=%{customdata[1]}<br>"
                 "kj_fit_status=%{customdata[2]}<br>"

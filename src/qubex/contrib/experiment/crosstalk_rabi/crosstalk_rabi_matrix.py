@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import jsonpickle
 import jsonpickle.ext.numpy as jsonpickle_numpy
@@ -45,6 +45,13 @@ def _build_target_index(targets: list[str]) -> dict[str, int]:
 
 def _matrix_figure_size(target_count: int) -> int:
     return int(np.clip(420 + 12 * max(target_count, 1), 720, 1800))
+
+
+def _finite_z_range(values: NDArray[np.float64]) -> tuple[float | None, float | None]:
+    finite_values = values[np.isfinite(values)]
+    if finite_values.size == 0:
+        return None, None
+    return float(np.min(finite_values)), float(np.max(finite_values))
 
 
 def _load_matrix_cache(path: Path | str) -> CrosstalkRabiMatrix:
@@ -159,31 +166,54 @@ class CrosstalkRabiMatrix:
         return rows
 
     def plot_ratio_matrix(
-        self, title: str = "Crosstalk Rabi ratio matrix"
+        self,
+        title: str = "Crosstalk Rabi ratio matrix",
+        mode: Literal["ratio", "dB"] = "dB",
     ) -> go.Figure:
         """Render the ratio matrix as a heatmap."""
+        if mode == "ratio":
+            z_matrix = self.r_matrix
+            colorbar_title = "r_kj"
+            hover_value = "r_kj=%{z:.5f}"
+        elif mode == "dB":
+            z_matrix = np.full_like(self.r_matrix, np.nan, dtype=np.float64)
+            np.log10(
+                self.r_matrix,
+                out=z_matrix,
+                where=np.isfinite(self.r_matrix) & (self.r_matrix > 0),
+            )
+            z_matrix *= 20
+            colorbar_title = "r_kj (dB)"
+            hover_value = "r_kj(dB)=%{z:.2f}"
+        else:
+            raise ValueError(f"Unsupported mode: {mode}")
+
         figure_size = _matrix_figure_size(len(self.targets))
         label_matrix = np.vectorize(STATUS_LABELS.get)(self.status_matrix)
         text_size = int(np.clip(np.round(600 / max(len(self.targets), 1)), 7, 12))
-        text = np.where(
-            np.isnan(self.r_matrix), "", np.round(self.r_matrix, 2).astype(str)
-        )
+        text = np.full(z_matrix.shape, "", dtype=object)
+        finite_mask = np.isfinite(z_matrix)
+        if mode == "dB":
+            text[finite_mask] = z_matrix[finite_mask].astype(int).astype(str)
+        else:
+            text[finite_mask] = np.round(z_matrix[finite_mask], 2).astype(str)
+        zmin, zmax = _finite_z_range(z_matrix)
         fig = viz.make_figure()
         fig.add_trace(
             go.Heatmap(
-                z=self.r_matrix,
+                z=z_matrix,
                 x=self.targets,
                 y=self.targets,
                 text=text,
                 customdata=label_matrix,
                 texttemplate="%{text}",
                 textfont={"size": text_size},
-                colorscale="Viridis",
-                colorbar_title="r_kj",
-                zmin=np.min(self.r_matrix[np.isfinite(self.r_matrix)]),
-                zmax=np.max(self.r_matrix[np.isfinite(self.r_matrix)]),
+                colorscale="Cividis",
+                colorbar_title=colorbar_title,
+                zmin=zmin,
+                zmax=zmax,
                 hovertemplate=(
-                    "measure=%{y}<br>drive=%{x}<br>r_kj=%{z:.5f}<br>status=%{customdata}<extra></extra>"
+                    f"measure=%{{y}}<br>drive=%{{x}}<br>{hover_value}<br>status=%{{customdata}}<extra></extra>"
                 ),
             )
         )
