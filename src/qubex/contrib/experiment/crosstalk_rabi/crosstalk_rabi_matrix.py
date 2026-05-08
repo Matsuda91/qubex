@@ -221,7 +221,7 @@ class CrosstalkRabiMatrix:
             summary
         )
 
-    def _ratio_summary_subtitle(self) -> str:
+    def _ratio_summary_subtitle(self, mode: Literal["ratio", "dB"] = "dB") -> str:
         group_values = {
             "Low-Low": [],
             "Low-High": [],
@@ -235,6 +235,12 @@ class CrosstalkRabiMatrix:
                 ratio = self.r_matrix[row, column]
                 if not np.isfinite(ratio):
                     continue
+                if mode == "dB":
+                    if ratio <= 0:
+                        continue
+                    ratio = 20 * np.log10(ratio)
+                elif mode != "ratio":
+                    raise ValueError(f"Unsupported mode: {mode}")
 
                 drive_group = _target_frequency_group(_canonical_target(drive_target))
                 group_values[f"{measure_group}-{drive_group}"].append(float(ratio))
@@ -245,7 +251,8 @@ class CrosstalkRabiMatrix:
                 summary[group] = "N/A"
                 continue
             summary[group] = f"{np.mean(values):.5g}"
-        return "Mean ratio: " + _format_group_values(summary)
+        unit = "dB" if mode == "dB" else "ratio"
+        return f"Mean {unit}: " + _format_group_values(summary)
 
     def plot_ratio_matrix(
         self,
@@ -300,7 +307,7 @@ class CrosstalkRabiMatrix:
             )
         )
         fig.update_layout(
-            title=_title_with_subtitle(title, self._ratio_summary_subtitle()),
+            title=_title_with_subtitle(title, self._ratio_summary_subtitle(mode=mode)),
             width=figure_size,
             height=figure_size,
             xaxis_title="drive target j",
